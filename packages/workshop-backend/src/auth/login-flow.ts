@@ -179,6 +179,11 @@ type LoginCallbackProps = { pendingId: string; vendorId: string };
 export class LoginConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, LoginCallbackProps>
     implements GatekeeperConnectCallback {
+  async getConnectionPrincipal(): Promise<string | null> {
+    // Sign-in did not start with an authenticated Workshop user, even if it later links an account.
+    return null;
+  }
+
   #pending() {
     const id = this.ctx.exports.PendingLogin.idFromString(this.ctx.props.pendingId);
     return this.ctx.exports.PendingLogin.get(id);

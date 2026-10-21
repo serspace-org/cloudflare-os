@@ -259,6 +259,23 @@ The invariant: **the ticket only ever reaches a document on the backend-supplied
 The kit rejects any `targetOrigin` that is not exactly an origin, and the origin itself comes from
 `PUBLIC_BASE_URL` alone.
 
+## Connector-scoped principal
+
+During explicit authenticated connection setup, a connector may call the optional
+`callback.getConnectionPrincipal()` to identify the initiating user within that vendor. The
+callback selects the user and vendor from trusted Workshop props, not caller-supplied selectors.
+The result is a persisted random 64-lowercase-hex identifier, unrelated to email or the raw Workshop
+user ID. It is stable for that user/vendor across repeated connections, disconnects and Durable
+Object restarts; different vendors and users receive unrelated principals. Removing an account does
+not remove this identity record. It is deployment-local, not a cross-deployment identity.
+
+This identifier is **not bearer authority**: allocation grants no data access, stages no account,
+and does not replace the browser handoff. Admin enablement/ambient provisioning does not call it
+or allocate a principal. Sign-in callbacks always return null, including after linking an account.
+Existing callback implementations may omit it. Native RPC stub property checks are not safe feature
+detection: attempt the call and handle an unsupported-method rejection, without falling back to raw
+user identity, email or account IDs.
+
 ## Why not postMessage, an opener, or a BroadcastChannel
 
 A popup that keeps `window.opener` exposes every page in the flow to reverse tabnabbing: any

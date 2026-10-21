@@ -25,6 +25,12 @@ export type ConnectedAccountRecord = {
   autoProvisioned?: boolean;
 };
 
+/** Stable, independently random identity for one vendor; retained when accounts disconnect. */
+type ConnectionPrincipalRecord = {
+  vendorId: string;
+  principal: string;
+};
+
 /**
  * A connect ("connect") or reconnect/ensureResources ("restore") flow that a gatekeeper has finished
  * but the user's browser has not yet confirmed (see connect-handoff.ts). Keyed by the SHA-256 of the
@@ -165,6 +171,9 @@ export function makeUserStorage(storage: DurableObjectStorage) {
       }),
       connectedAccounts: collection<ConnectedAccountRecord>()({
         primaryKey: "id"
+      }),
+      connectionPrincipals: collection<ConnectionPrincipalRecord>()({
+        primaryKey: "vendorId",
       }),
       sessions: collection<LoginSessionRecord>()({
         primaryKey: "tokenId",

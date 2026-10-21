@@ -1311,6 +1311,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return (await Promise.all(promises)).filter(value => value !== null);
   }
 
+  /** Internal native RPC for a connect callback's trusted vendor, not a browser/agent API. */
+  getConnectionPrincipal(vendorId: string): string {
+    let record = this.storage.connectionPrincipals.get(vendorId);
+    if (!record) {
+      // No await between lookup and write: concurrent callbacks must receive the same principal.
+      let principal = crypto.getRandomValues(new Uint8Array(32)).toHex();
+      record = { vendorId, principal };
+      this.storage.connectionPrincipals.put(record);
+    }
+    return record.principal;
+  }
+
   async connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<ConnectFlowStart> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
@@ -2290,6 +2302,10 @@ type GatekeeperConnectCallbackProps = {
 export class GatekeeperConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
     implements GatekeeperConnectCallback {
+  async getConnectionPrincipal(): Promise<string | null> {
+    return this.#getUserStub().getConnectionPrincipal(this.ctx.props.vendorId);
+  }
+
   #getUserStub() {
     let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
     return this.ctx.exports.UserDurableObject.get(userId);
