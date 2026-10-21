@@ -263,6 +263,8 @@ describe("LoginConnectCallbackImpl", () => {
       });
       const callback = callbackFor(user, pendingId);
 
+      // A sign-in callback has no initiating authenticated user, even after linking an account.
+      expect(await callback.getConnectionPrincipal()).toBeNull();
       const handoff = await callback.reconnectComplete(STAGE_ID, new Date("2027-01-01"));
       expect(handoff.ticket).toMatch(/^[0-9a-f]{64}$/);
       expect([...user.storage.pendingHandoffs.list()]).toMatchObject([
@@ -285,6 +287,7 @@ describe("LoginConnectCallbackImpl", () => {
     await runInDurableObject(userStub, async (instance: UserDurableObject) => {
       const user = instance as UserInternals;
       const callback = callbackFor(user, pendingId);
+      expect(await callback.getConnectionPrincipal()).toBeNull();
       let outcome = "ok";
       try {
         await callback.reconnectComplete(STAGE_ID);
