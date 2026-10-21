@@ -17,7 +17,19 @@ Workshop's browser tests need Chromium installed once with
 `pnpm --filter @gadgets/workshop-frontend exec playwright install chromium`.
 Run them separately with `pnpm --filter @gadgets/workshop-frontend test:run:browser`.
 
+## Bonk in forks
+
+Automatic Bonk PR reviews and comment-triggered Bonk runs are disabled in forks by
+default. To opt in, configure the workflow's AI Gateway secrets and `BONK_MODEL`
+repository variable, then set the repository variable `BONK_ENABLED` to `true`.
+The upstream `cloudflare/cloudflare-os` repository retains its existing behavior.
+This switch does not control the separate Workshop eval trajectory-review job.
+
 ## Watchdog policy
+
+The aliased large-text PPTX export regression test has a 30-second per-test limit to
+accommodate shared CI runners while retaining its full 7.9 MB fixture and assertions.
+This is separate from the process watchdog below.
 
 Shared test tasks use `scripts/with-timeout.ts`: 60 seconds without output and 600 seconds total.
 Import-heavy backend unit tests use a 120-second idle allowance. These process-level watchdogs are

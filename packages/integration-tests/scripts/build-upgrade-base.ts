@@ -47,7 +47,9 @@ export function buildUpgradeBase(): void {
   try {
     execFileSync("git", ["cat-file", "-e", `${UPGRADE_BASE}^{commit}`], { cwd: WORKSPACE_DIR, stdio: "ignore" });
   } catch {
-    run("git", ["fetch", "--depth=1", "origin", UPGRADE_BASE], WORKSPACE_DIR);
+    // The pinned baseline belongs to public upstream; a fork's origin may require credentials
+    // that CI deliberately does not persist after checkout.
+    run("git", ["fetch", "--depth=1", "https://github.com/cloudflare/cloudflare-os.git", UPGRADE_BASE], WORKSPACE_DIR);
   }
   const tree = mkdtempSync(join(tmpdir(), "gadgets-upgrade-base-"));
   run("git", ["worktree", "add", "--detach", tree, UPGRADE_BASE], WORKSPACE_DIR);

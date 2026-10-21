@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import type { GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import type { GatekeeperConnectCallbackImpl, UserDurableObject } from "../src/user.js";
 import {
@@ -23,7 +23,13 @@ type Expiring<T extends { expiresAt: Date }> = { list(): Iterable<T>; put(record
 // What a test reaches into the user DO for: the typed collections behind the public methods.
 type UserInternals = UserDurableObject & {
   storage: {
-    connectedAccounts: { get(id: number): Record<string, unknown> | undefined; put(record: unknown): void };
+    connectedAccounts: {
+      get(id: number): Record<string, unknown> | undefined;
+      put(record: unknown): void;
+      delete(id: number): void;
+    };
+    connectionPrincipals: { list(): Iterable<{ vendorId: string; principal: string }> };
+    profile: { get(): { id: string } };
     pendingHandoffs: Expiring<{ expiresAt: Date }>;
     pendingConnectFlows: Expiring<{ nonceHash: string; accountId: number; expiresAt: Date }>;
     nextAccountId: { get(): number; put(n: number): void };
@@ -89,6 +95,94 @@ function expireAll(records: Expiring<{ expiresAt: Date }>) {
 }
 
 describe("connect handoff", () => {
+  it("persists only a user/vendor-scoped principal through callback RPC, including concurrent calls", async () => {
+    const owner = freshUser();
+    const foreign = freshUser();
+    async function principals(subject: ReturnType<typeof freshUser>) {
+      return subject.inDo(async user => {
+        const before = Array.from(user.ctx.storage.kv.list());
+        const alarmBefore = await user.ctx.storage.getAlarm();
+        const results = await Promise.all([0, 1, 2].map(accountId => {
+          const callback = user.ctx.exports.TestConnectCallback({
+            props: { userId: user.ctx.id.toString(), accountId, vendorId: "github" },
+          });
+          return callback.getConnectionPrincipal();
+        }));
+        for (const [accountId, vendorId] of [[3, "google"], [4, "github"]] as const) {
+          const callback = user.ctx.exports.TestConnectCallback({
+            props: { userId: user.ctx.id.toString(), accountId, vendorId },
+          });
+          results.push(await callback.getConnectionPrincipal());
+        }
+        const records = Array.from(user.storage.connectionPrincipals.list());
+        expect(records).toHaveLength(2);
+        expect(records).toEqual(expect.arrayContaining([
+          { vendorId: "github", principal: results[0] },
+          { vendorId: "google", principal: results[3] },
+        ]));
+        // Allocation writes only the principal records, never accounts, grants, flows or counters.
+        const after = Array.from(user.ctx.storage.kv.list());
+        expect(after.filter(([key]) => before.some(([oldKey]) => key === oldKey))).toEqual(before);
+        const added = after.filter(([key]) => !before.some(([oldKey]) => key === oldKey));
+        // Typed storage keeps the primary key in the KV key, not in the serialized record.
+        expect(added.map(([, value]) => value)).toEqual(expect.arrayContaining(
+          records.map(record => ({ ...record, vendorId: null }))));
+        expect(added).toHaveLength(2);
+        expect(await user.ctx.storage.getAlarm()).toEqual(alarmBefore);
+        expect(user.storage.connectedAccounts.get(0)).toBeUndefined();
+        expect(user.storage.connectedAccounts.get(1)).toBeUndefined();
+        expect(pendingCount(user)).toBe(0);
+        expect(flowCount(user)).toBe(0);
+        expect(user.storage.nextAccountId.get()).toBe(0);
+        for (const principal of results) {
+          expect(principal).toMatch(/^[0-9a-f]{64}$/);
+          expect(principal).not.toBe(user.ctx.id.toString());
+          expect(principal).not.toBe(user.storage.profile.get().id);
+        }
+        expect(results[1]).toBe(results[0]);
+        expect(results[2]).toBe(results[0]);
+        expect(results[4]).toBe(results[0]);
+        expect(results[3]).not.toBe(results[0]);
+        return results;
+      });
+    }
+
+    const ownerPrincipals = await principals(owner);
+    const foreignPrincipals = await principals(foreign);
+    expect(ownerPrincipals.every(principal => !foreignPrincipals.includes(principal))).toBe(true);
+  });
+
+  it("retains the principal after account deletion and a real Durable Object restart", async () => {
+    const owner = freshUser();
+    const id = owner.stub.id;
+    const principal = await owner.inDo(async user => {
+      const callback = user.ctx.exports.TestConnectCallback({
+        props: { userId: user.ctx.id.toString(), accountId: 0, vendorId: "github" },
+      });
+      const result = await callback.getConnectionPrincipal();
+      user.storage.connectedAccounts.put({
+        id: 0, account: fakeAccount(user, "disconnected").account,
+        vendorId: "github", description: { displayName: "disconnected" },
+      });
+      // Simulate disconnect's removal of the account, independently of revocation/notifications.
+      user.storage.connectedAccounts.delete(0);
+      return result;
+    });
+    await abortAllDurableObjects();
+    // Aborted native stubs cannot be reused: reconstruct the DO from its persisted storage.
+    await runInDurableObject(env.TEST_USER.get(id), async (instance: UserDurableObject) => {
+      const user = instance as UserInternals;
+      expect(user.storage.connectedAccounts.get(0)).toBeUndefined();
+      expect(Array.from(user.storage.connectionPrincipals.list())).toEqual([
+        { vendorId: "github", principal },
+      ]);
+      const callback = user.ctx.exports.TestConnectCallback({
+        props: { userId: user.ctx.id.toString(), accountId: 1, vendorId: "github" },
+      });
+      expect(await callback.getConnectionPrincipal()).toBe(principal);
+    });
+  });
+
   it("stages a connect and activates it only when its ticket is redeemed", async () => {
     const { stub, inDo } = freshUser();
     const { handoff, nonce } = await inDo(async user => {
@@ -392,6 +486,8 @@ describe("connect handoff", () => {
         props: { userId: user.ctx.id.toString(), accountId: 0, vendorId: "github" },
       });
       const staged = await callback.complete(fakeAccount(user, "via-callback").account);
+      expect(await callback.getConnectionPrincipal()).toMatch(/^[0-9a-f]{64}$/);
+      expect(pendingCount(user)).toBe(1);
       expect(user.storage.connectedAccounts.get(0)).toBeUndefined();
       return staged;
     });

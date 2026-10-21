@@ -304,6 +304,7 @@ type RequestOptions = {
   auth?: "bearer" | "basic" | "none";
   headers?: Record<string, string | undefined>;
   okStatuses?: number[];
+  boundedText?: number;
   basicAuth?: {
     username: string;
     password: string;
@@ -354,6 +355,28 @@ async function parseBody(response: Response): Promise<unknown> {
   }
 
   return await response.text();
+}
+
+async function readBoundedText(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      bytes += value.byteLength;
+      if (bytes > limit) throw new Error("GitHub README exceeds the 256 KiB limit.");
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function isRedirect(status: number): boolean {
@@ -435,6 +458,11 @@ async function request<T>(
 
   const init: RequestInit = { method, headers, body, redirect: "manual" };
   let response = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  if (options.boundedText !== undefined && isRedirect(response.status)) {
+    await response.body?.cancel();
+    throw new GitHubApiError(response.status,
+      `GitHub README unavailable or access denied (HTTP ${response.status}).`);
+  }
   if (isRedirect(response.status)) {
     const target = redirectTarget(url, response.headers.get("location"), pin);
     if (target) {
@@ -445,6 +473,19 @@ async function request<T>(
       throw new GitHubApiError(response.status,
         `GitHub moved ${url.pathname} out of the bound repository; it was not followed.`);
     }
+  }
+
+  if (options.boundedText !== undefined) {
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new GitHubApiError(response.status,
+        `GitHub README unavailable or access denied (HTTP ${response.status}).`);
+    }
+    return {
+      data: await readBoundedText(response, options.boundedText) as T,
+      headers: response.headers,
+      status: response.status,
+    };
   }
 
   if (!response.ok && !(options.okStatuses ?? []).includes(response.status)) {
@@ -650,6 +691,16 @@ export class GitHubApi {
       undefined,
       options,
     );
+  }
+
+  /** Reads only the selected repository's default-branch README, bounded to 256 KiB. */
+  async readReadme(owner: string, repo: string): Promise<string> {
+    const result = await this.#request<string>("GET",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/readme`, {
+        headers: { Accept: "application/vnd.github.raw+json" },
+        boundedText: 256 * 1024,
+      });
+    return result.data;
   }
 
   /**

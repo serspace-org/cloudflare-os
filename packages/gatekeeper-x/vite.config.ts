@@ -1,5 +1,5 @@
 import gatekeeperConfiguratorConfig from "@gadgets/scripts/gatekeeper-configurator";
-import { vitestTask } from "@gadgets/scripts/vitest-task";
+import { vitestTask, type GlobWithBase } from "@gadgets/scripts/vitest-task";
 
 /**
  * Vite+ per-package settings: the shared configurator `build`/`build:configurator` tasks plus a
@@ -14,6 +14,19 @@ export default {
     ...gatekeeperConfiguratorConfig.run,
     tasks: {
       ...gatekeeperConfiguratorConfig.run.tasks,
+      // Node-only tests need Node types; production and workerd tests must not
+      // acquire them. Check both programs, and fingerprint their test inputs.
+      build: {
+        ...gatekeeperConfiguratorConfig.run.tasks.build,
+        command: ["tsc", "tsc -p tsconfig.test.json"],
+        cache: {
+          input: [
+            { auto: true },
+            { pattern: "packages/gatekeeper-x/__tests__/**", base: "workspace" } satisfies GlobWithBase,
+            { pattern: "packages/gatekeeper-x/tsconfig*.json", base: "workspace" } satisfies GlobWithBase,
+          ],
+        },
+      },
       test: {
         ...vitestTask(["vitest run", "vitest run -c vitest.worker.config.ts"]),
         dependsOn: ["build:configurator"],

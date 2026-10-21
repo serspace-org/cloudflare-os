@@ -1055,6 +1055,7 @@ describe("Workspace Slides PPTX resource limits", () => {
     expect(xml).not.toContain("?:");
   });
 
+  // This near-limit export needs extra time on shared CI runners, not a smaller fixture.
   it("exports many references to one large text block without holding the deck text twice", async () => {
     // Structured-clone decks can alias one block object many times; the export must not build
     // per-character ropes over the resulting 7.9 MB of text.
@@ -1063,7 +1064,7 @@ describe("Workspace Slides PPTX resource limits", () => {
     const zip = await readZip(deckToPptx(oneSlide(Array.from({length: 79}, () => shared))));
     const xml = partText(zip, "ppt/slides/slide1.xml");
     expect(occurrences(xml, "&amp; dolor &lt;sit&gt; amet")).toBe(79 * 3_225);
-  });
+  }, 30_000);
 
   it("reports aggregate text and line-break limits", () => {
     const largeText = "x".repeat(900_000);

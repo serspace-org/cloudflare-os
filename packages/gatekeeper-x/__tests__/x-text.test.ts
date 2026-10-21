@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { threadCpuUsage } from "node:process";
 import { comparableText, comparableUrl, duplicateKey, extractMentions, extractUrls, weightedLength, withoutLeadingMentions } from "../src/x-text";
 
 describe("weightedLength", () => {
@@ -45,13 +46,26 @@ describe("extraction", () => {
     expect(extractUrls(`${"a".repeat(64)}.com`)).toEqual([]);
   });
 
-  it("weighs long drafts in time linear in their length", () => {
+  it("bounds CPU work for long drafts that previously caused backtracking", () => {
     // Each took seconds when a failed match could backtrack across the whole run.
-    for (const text of ["a.".repeat(50_000), "a-".repeat(50_000), `https://x.co/${".".repeat(100_000)}a`]) {
-      const started = performance.now();
-      weightedLength(text);
-      comparableText(text);
-      expect(performance.now() - started).toBeLessThan(1000);
+    // These functions are synchronous. Measure this worker's CPU, not time spent
+    // descheduled while parallel package tests compete on a shared CI runner.
+    // Keep the same one-second budget; the ordinary test timeout still applies.
+    const dotted = "a.".repeat(50_000);
+    const hyphenated = "a-".repeat(50_000);
+    const cases = [
+      { text: dotted, weight: 100_000, comparable: dotted },
+      { text: hyphenated, weight: 100_000, comparable: hyphenated },
+      { text: `https://x.co/${".".repeat(100_000)}a`, weight: 23, comparable: "" },
+    ];
+    for (const { text, weight, comparable } of cases) {
+      const started = threadCpuUsage();
+      const actualWeight = weightedLength(text);
+      const actualComparable = comparableText(text);
+      const cpu = threadCpuUsage(started);
+      expect(actualWeight).toBe(weight);
+      expect(actualComparable).toBe(comparable);
+      expect(cpu.user + cpu.system).toBeLessThan(1_000_000); // microseconds
     }
   });
 

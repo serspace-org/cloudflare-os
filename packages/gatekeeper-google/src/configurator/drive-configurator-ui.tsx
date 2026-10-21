@@ -182,8 +182,9 @@ export default {
       </Field>
       {pending && <Fragment>
         <Notice>
-          Google will ask to let this app "View and download all your Drive files". It is used only to
-          list your shared drives: a connection still reaches only what you choose.
+          Google will ask to let this app "View and download all your Drive files". This picker uses
+          that permission to list your shared drives; Drive connections also use it to read selected
+          content, including PDFs. Each connection still reaches only what you choose.
         </Notice>
         <Button onClick={() => void allow(context, pending.grant)}>Allow access</Button>
         {pending.note && <Notice tone={pending.note.tone}>{pending.note.text}</Notice>}

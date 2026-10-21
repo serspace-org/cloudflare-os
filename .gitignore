@@ -22,7 +22,11 @@ packages/workshop-backend/src/generated/browser-export-page.js
 
 # Cloudflare Workers
 .wrangler
+/.wrangler.backup-*/
 .env
+
+# Local task worktrees
+/.worktrees/
 
 # Local dev secrets (loaded by run-dev-server.ts)
 .dev.vars*

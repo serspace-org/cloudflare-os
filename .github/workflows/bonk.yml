@@ -16,7 +16,9 @@ jobs:
   # arrives as `CONTRIBUTOR` — which silently ignored them. The mention terms below mirror the
   # `mentions:` input, so the job starts on the same comments the action would act on.
   bonk:
+    # Forks must explicitly opt in after configuring Bonk's gateway and model.
     if: >-
+      (github.repository == 'cloudflare/cloudflare-os' || vars.BONK_ENABLED == 'true') &&
       github.event.sender.type != 'Bot' &&
       (contains(github.event.comment.body, '/bonk') ||
        contains(github.event.comment.body, '@ask-bonk'))

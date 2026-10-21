@@ -1,5 +1,19 @@
 # Contributing to Cloudflare OS
 
+## Private Serspace fork
+
+In `serspace-org/serspace-cloudflare-os`, the inherited Cloudflare CLA job is
+skipped while the repository is private, including pull requests targeting
+`serspace`. It remains active in other repositories and becomes active here if
+the repository becomes public. This changes the bot automation only; the
+license and requirements for contributions to Cloudflare upstream are unchanged.
+
+The exception takes effect after its workflow change is merged into `serspace`:
+`pull_request_target` and comment events use the trusted base/default-branch
+workflow. Existing failed checks are not automatically cleared by this change.
+
+## Upstream contribution policy
+
 At this time, we are not seeking outside contribution.
 
 AI has made writing code easy. The hard part, today, is not writing the code, but reviewing it, making sure quality stays high, and keeping the product coherent. In that light, unfortunately, external code contributions are "donating" the easy part of the job, while creating more of the hard work.

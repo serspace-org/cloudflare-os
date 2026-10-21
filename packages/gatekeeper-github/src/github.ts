@@ -4455,6 +4455,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#getRepoMetadata();
   }
 
+  async repoReadme(): Promise<string> {
+    const { owner, repo } = this.ctx.props;
+    return this.#withApi(api => api.readReadme(owner, repo));
+  }
+
   async openIssue(id: string): Promise<GitHubIssueDetails> {
     return this.#getIssueDetails(id);
   }
@@ -5660,6 +5665,14 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
       description: `Read basic metadata for the GitHub repository ${metadata.fullName}.`,
     });
     return metadata;
+  }
+
+  async readReadme(): Promise<string> {
+    await this.#approvalQueue.authorizeObservation({
+      title: "Read repository README",
+      description: "Read the default-branch README of the connected GitHub repository.",
+    });
+    return this.#gatekeeper.repoReadme();
   }
 
   async createIssue(options: GitHubCreateIssueOptions): Promise<GitHubIssue> {

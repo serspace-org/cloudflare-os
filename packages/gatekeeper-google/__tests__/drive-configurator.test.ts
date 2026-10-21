@@ -58,6 +58,7 @@ it("asks for the grant a location names, then stops once a listing loads", async
   await expect(frame.list("shared-drives")).resolves.toEqual(
     { items: [], unavailable: expect.stringContaining("Allow it below, then select Retry.") });
   expect(frame.notices()).toEqual([GRANT_NOTICE]);
+  expect(frame.notices()[0].text).toContain("Drive connections also use it to read selected content, including PDFs.");
   frame.allow();
   expect(frame.ensureResources).toHaveBeenCalledExactlyOnceWith([GRANT]);
   await vi.waitFor(() => expect(frame.notices()).toContainEqual(

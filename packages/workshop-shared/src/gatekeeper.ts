@@ -739,6 +739,22 @@ export function workerVersionTag(env: object): string | undefined {
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   /**
+   * Returns a random opaque principal scoped to the initiating Workshop user and this connector
+   * (vendor), or null for sign-in flows, even after they link an account. Call only during explicit
+   * authenticated connection setup. The 64-lowercase-hex value is persisted in the user's storage:
+   * repeated connections to this vendor retain it across disconnects and Workshop restarts, while
+   * other vendors receive unrelated values. It discloses neither email nor the raw Workshop user ID
+   * and is not portable across deployments. It is an identifier, NOT a bearer capability or data
+   * grant. Looking it up only allocates the principal record; it does not activate an account or
+   * replace the browser handoff required by `complete()`. Admin enablement alone does not allocate it.
+   *
+   * Optional for compatibility with older Workshops and other callback implementations. Native RPC
+   * stubs cannot safely feature-detect methods: callers must attempt the call and handle rejection
+   * when unsupported. Do not fall back to raw Workshop identity, email, or connected-account IDs.
+   */
+  getConnectionPrincipal?(): Promise<string | null>;
+
+  /**
    * Indicates the connection completed successfully. The Workshop *stages* the account: it is not
    * added to the user's list until the returned handoff has been redeemed from the initiating
    * user's browser (see `GatekeeperVendor.connectAccount`). The caller must render the handoff into

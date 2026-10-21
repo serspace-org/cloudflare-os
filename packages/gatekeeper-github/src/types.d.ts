@@ -15,6 +15,13 @@ export interface GitHubRepo {
   getMetadata(): Promise<GitHubRepoMetadata>;
 
   /**
+   * Reads this repository's preferred README from its default branch as original UTF-8 text,
+   * not rendered HTML. Throws if unavailable, access is denied, the text is not valid UTF-8,
+   * or the content exceeds 256 KiB. No branch or file path is required.
+   */
+  readReadme(): Promise<string>;
+
+  /**
    * Lists branches in this repository.
    *
    * Results are streamed through the returned cursor. Call `next()` repeatedly on that

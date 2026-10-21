@@ -14,6 +14,9 @@ permissions:
 
 jobs:
   CLAssistant:
+    # Internal changes in this private Serspace fork do not use the upstream CLA bot.
+    # Keep the inherited behavior elsewhere, or if this repository becomes public.
+    if: github.repository != 'serspace-org/serspace-cloudflare-os' || github.event.repository.private != true
     runs-on: ubuntu-latest
     steps:
       - name: "CLA Assistant"

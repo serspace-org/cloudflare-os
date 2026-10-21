@@ -29,6 +29,17 @@ export default defineConfig({
         bindings: {
           CLIENT_ID: "test-client", CLIENT_SECRET: "test-secret", WEBHOOK_ORIGIN: "https://gadgets.test",
         },
+        // Exercise real workerd fetch-option validation without contacting GitHub or using secrets.
+        outboundService: async request => {
+          const url = new URL(request.url);
+          if (url.hostname !== "api.github.com" || request.headers.get("Authorization") !== "Bearer test-token") {
+            return new Response(null, { status: 403 });
+          }
+          if (url.pathname === "/repos/owner/redirect/readme") {
+            return new Response(null, { status: 302, headers: { Location: "https://other.example/" } });
+          }
+          return new Response("# Runtime README\n");
+        },
         durableObjects: {
           USER_ACCOUNT: { className: "UserAccount", useSQLite: true },
           GITHUB_GATEKEEPER: { className: "GitHubGatekeeperImpl", useSQLite: true },
