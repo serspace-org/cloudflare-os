@@ -23,7 +23,7 @@ const GOLDEN_PATH = join(TESTDATA, "golden-manifest.json");
 
 // Placeholder syntax the deploy-side renderer understands. Closed list — see manifest-lib.ts.
 const PLACEHOLDER_RE =
-    /^\$(ACCOUNT_ID|PUBLIC_BASE_URL|KV_[A-Z0-9_]+_ID|R2_[A-Z0-9_]+_NAME|WORKER_NAME\([a-z0-9-]+\)|SECRET\([A-Z0-9_]+\))/;
+    /^\$(ACCOUNT_ID|PUBLIC_BASE_URL|KV_[A-Z0-9_]+_ID|R2_[A-Z0-9_]+_NAME|D1_[A-Z0-9_]+_ID|VECTORIZE_[A-Z0-9_]+_NAME|WORKER_NAME\([a-z0-9-]+\)|SECRET\([A-Z0-9_]+\))/;
 
 function readTestWorkerBuilds() {
   return readDeployablePackages(join(ROOT, "packages")).map((pkg) => {
@@ -87,6 +87,14 @@ test("every $-token in binding templates and vars uses known placeholder syntax"
     check(entry.vars, `${name}.vars`);
     check(entry.gatekeeperBindingExpansion ?? {}, `${name}.gatekeeperBindingExpansion`);
   }
+});
+
+test("Salesforce workflow schedules survive the generated-config export layout", () => {
+  const { workers } = buildTestManifest();
+  assert.deepEqual(workers["gatekeeper-salesforce"].bindings.find((b) => b.name === "SF_SYNC"), {
+    type: "workflow", name: "SF_SYNC", class_name: "SalesforceSyncWorkflow",
+    schedules: ["0 */2 * * *"],
+  });
 });
 
 test("worker entries carry the deploy contract", () => {

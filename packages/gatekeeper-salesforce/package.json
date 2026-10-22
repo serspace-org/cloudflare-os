@@ -1,0 +1,29 @@
+{
+  "name": "@gadgets/gatekeeper-salesforce",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
+    "deploy": "wrangler deploy",
+    "build": "tsc",
+    "types:check": "tsc --noEmit",
+    "test:run": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@gadgets/observability": "workspace:*",
+    "@gadgets/error-reporting": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "catalog:",
+    "capnweb-validate": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "catalog:",
+    "@gadgets/scripts": "workspace:*",
+    "@types/node": "26.1.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

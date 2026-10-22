@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ESNext"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["./worker-configuration.d.ts", "node"],
+    "noEmit": true
+  },
+  "include": ["src", "__tests__"],
+  "exclude": ["dist", "node_modules", ".wrangler"]
+}

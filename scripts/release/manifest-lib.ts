@@ -113,6 +113,14 @@ export interface WranglerConfig {
   kv_namespaces?: KvNamespaceDecl[];
   /** R2 bucket bindings; names become `$R2_<BINDING>_NAME` placeholders. */
   r2_buckets?: BindingDecl[];
+  /** D1 bindings; database ids are supplied by the deploy service. */
+  d1_databases?: BindingDecl[];
+  /** Vectorize bindings; index names are supplied by the deploy service. */
+  vectorize?: BindingDecl[];
+  /** Workflow bindings and their worker-local entrypoint classes. */
+  workflows?: { binding: string; class_name: string; schedules?: string[] }[];
+  /** Workflow definitions emitted by @cloudflare/config, including their schedules. */
+  exports?: Record<string, { type: "workflow"; name: string; schedules?: string | string[] }>;
   /** Worker Loader bindings (the Gadget sandbox). */
   worker_loaders?: BindingDecl[];
   /** Service bindings; targets become `$WORKER_NAME(<pkg>)` placeholders. */
@@ -263,6 +271,7 @@ const HANDLED_CONFIG_KEYS = new Set([
   // gatekeeper-context's Artifacts binding is closed-beta and cannot be provisioned in arbitrary
   // user accounts; it is dropped from customer manifests (the gatekeeper degrades gracefully).
   "artifacts",
+  "d1_databases", "vectorize", "workflows", "exports",
 ]);
 
 const ARTIFACTS_CUT_ALLOWED = new Set(["gatekeeper-context"]);
@@ -276,6 +285,7 @@ const NO_DEFAULT_CRED_INPUTS = new Set([
   "gatekeeper-websearch",     // auto-provisioned; searches through the account's own AI Gateway
   "gatekeeper-mcp",           // MCP OAuth uses dynamic client registration, not a static app
   "gatekeeper-mcp-portal",    // same MCP OAuth chain as gatekeeper-mcp
+  "gatekeeper-salesforce",    // JWT service account; inputs declared in deploy-inputs.json
 ]);
 
 // Not installable on customer instances: Email Routing needs a zone, which workers.dev-hosted
@@ -446,9 +456,25 @@ export function buildWorkerEntry(
     // `remote` is dev-only wrangler behavior; the deployed binding is just { type, name }.
     bindings.push({ type: "browser", name: config.browser.binding });
   }
+  for (const d1 of config.d1_databases ?? []) {
+    bindings.push({ type: "d1", name: d1.binding, database_id: `$D1_${d1.binding}_ID` });
+  }
+  for (const vz of config.vectorize ?? []) {
+    bindings.push({
+      type: "vectorize", name: vz.binding, index_name: `$VECTORIZE_${vz.binding}_NAME`,
+    });
+  }
   if (config.ai) {
     // Like browser: `remote` is dev-only.
     bindings.push({ type: "ai", name: config.ai.binding });
+  }
+  for (const wf of config.workflows ?? []) {
+    const schedule = config.exports?.[wf.class_name]?.schedules ?? wf.schedules;
+    const schedules = typeof schedule === "string" ? [schedule] : schedule;
+    bindings.push({
+      type: "workflow", name: wf.binding, class_name: wf.class_name,
+      ...(schedules?.length ? { schedules } : {}),
+    });
   }
   for (const loader of config.worker_loaders ?? []) {
     bindings.push({ type: "worker_loader", name: loader.binding });
