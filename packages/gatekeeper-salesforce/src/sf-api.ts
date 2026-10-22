@@ -9,10 +9,9 @@ import { toSfId15 } from "./salesforce-types.js";
 export type { SalesforceAuthConfig, SalesforceAccessToken } from "./sf-auth.js";
 
 export interface SfQueryOptions {
-  // A URL-encoded SOQL WHERE clause fragment, e.g. "SystemModstamp > 2026-08-01T00:00:00Z".
+  /** A SOQL WHERE clause fragment, e.g. "SystemModstamp > 2026-08-01T00:00:00Z". */
   sinceModstamp?: string;
-  // Page size hint for REST query responses (Salesforce caps at 2000). Does NOT cap the total
-  // result set — pagination via nextRecordsUrl continues until exhausted or maxRecords.
+  /** REST page size hint, not a cap on the total paginated result set. */
   pageSize?: number;
 }
 
@@ -28,7 +27,7 @@ export class SfApiError extends Error {
   }
 }
 
-// A minimal Salesforce query result.
+/** A Salesforce query page and its optional continuation URL. */
 export interface SfQueryResult {
   records: SfRecord[];
   nextRecordsUrl?: string;
@@ -112,7 +111,7 @@ export class SalesforceClient {
   #token: SalesforceAccessToken | null = null;
   #tokenPromise: Promise<SalesforceAccessToken> | null = null;
   #config: SalesforceAuthConfig;
-  // REST page-size hint (Sforce-Query-Options batchSize). Not a total-result cap.
+  /** REST page-size hint (Sforce-Query-Options batchSize), not a total-result cap. */
   readonly queryPageSize: number;
 
   constructor(
@@ -285,8 +284,7 @@ export class SalesforceClient {
   }
 }
 
-// Quote an ISO-8601 timestamp for use in SOQL datetime literal position. Salesforce SOQL accepts
-// bare ISO 8601 datetimes (e.g. 2026-08-01T00:00:00Z) next to comparison operators.
+/** Escape quotes in an ISO timestamp used in a bare SOQL datetime literal position. */
 export function isoQuote(value: string): string {
   return value.replace(/'/g, "''");
 }

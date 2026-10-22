@@ -4,12 +4,9 @@
 
 import { DurableObject, RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { boundAgentCatalog } from "@gadgets/workshop-shared/gatekeeper";
 import type {
   AccountDescription,
   ActionKind,
-  AgentCatalog,
-  AgentCatalogRequest,
   AppUiContext,
   ApprovalQueue,
   Gatekeeper,
@@ -66,7 +63,7 @@ interface SalesforceIndex {
   listObjects(): Promise<SalesforceObjectInfo[]>;
 
   /** Requests a re-sync of one object type (or all) with Salesforce. */
-  resync(opts?: { objectType?: string }): Promise<{ started: boolean; objectTypes?: number }>;
+  resync(opts?: { objectType?: string }): Promise<{ started: boolean; objectType?: string }>;
 }
 
 /** A ranked Salesforce search hit. */
@@ -123,7 +120,7 @@ export class SalesforceAccount
     };
   }
 
-  // Return the agent-facing read-path gatekeeper class, scoped by this account's props.
+  /** Return the agent-facing read-path gatekeeper class, scoped by this account's props. */
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<SalesforceReadSession>>> {
     return this.ctx.exports.SalesforceGatekeeper({ props: this.ctx.props });
   }
@@ -148,6 +145,9 @@ export class SalesforceAccount
     // Nothing per-account is stored; the mirror is shared across accounts.
   }
   reconnect(): never {
+    throw new Error("The Salesforce gatekeeper is auto-provisioned; it has no connect flow.");
+  }
+  async commitReconnect(_stageId: string): Promise<void> {
     throw new Error("The Salesforce gatekeeper is auto-provisioned; it has no connect flow.");
   }
   async getAuthenticatedEmail(): Promise<string | null> {
@@ -201,31 +201,13 @@ export class SalesforceGatekeeper
     return this.#newReadSession(approvalQueue);
   }
 
-  async getAgentCatalog(
-    request: AgentCatalogRequest,
-    authorizer: NativeRpcStub<ObservationAuthorizer>,
-  ): Promise<AgentCatalog> {
-    // Catalog = the object types the mirror currently indexes.
-    // Reuse the read path's D1 access via the read session would double-authorize; instead build a
-    // lightweight catalog directly from D1 (the same listObjects() data) and authorize one catalog
-    // observation.
-    const { listObjectInfo } = await import("./sf-store.js");
-    const info = await listObjectInfo(this.env.SF_DB);
-    const entries = info.map((i) => ({
-      id: i.objectType,
-      title: i.title,
-      description: i.description ?? `${i.documentCount} record(s) indexed.`,
-    }));
-    if (entries.length > 0) {
-      await authorizer.authorizeObservation({
-        title: "Salesforce catalog",
-        description: `Listed ${entries.length} indexed Salesforce object type(s).`,
-      });
-    }
-    return boundAgentCatalog(entries, request);
+  async getAgentCatalog(): Promise<null> {
+    // Current catalogs are unobserved prompt metadata. Keep CRM discovery behind the authorized
+    // listObjects() session read rather than moving the old observed catalog into that channel.
+    return null;
   }
 
-  // Read-only gatekeeper: no side-effecting actions, so nothing is ever auto-approvable.
+  /** Read-only gatekeeper: no side-effecting actions, so nothing is ever auto-approvable. */
   async getAutoApprovableActions(): Promise<ActionKind[]> {
     return [];
   }
@@ -264,12 +246,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
     };
   }
 
-  // Mint a fresh account capability with no user identity.
+  /** Mint a fresh account capability with no user identity. */
   @skipRpcValidation()
   async createAccount(): Promise<Fetcher<GatekeeperUser>> {
     return this.ctx.exports.SalesforceAccount({
       props: { accountId: crypto.randomUUID() },
-    }) as unknown as Fetcher<GatekeeperUser>;
+    });
   }
 
   connectAccount(

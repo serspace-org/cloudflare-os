@@ -21,7 +21,7 @@ export type StoredRecord = {
   system_modstamp: string;
 };
 
-// Raw D1 row → typed record.
+/** Convert a raw D1 row into a typed stored record. */
 export function rowToStored(row: Record<string, unknown>): StoredRecord {
   return {
     sf_id: String(row.sf_id),
@@ -36,7 +36,7 @@ export function rowToStored(row: Record<string, unknown>): StoredRecord {
   };
 }
 
-// Insert or replace a batch of records (and their metadata) in one transaction.
+/** Insert or replace a batch of records and metadata in one transaction. */
 export async function upsertRecords(
   db: D1Database,
   records: {
@@ -122,7 +122,7 @@ export async function deleteRecordsByIds(db: D1Database, ids: string[]): Promise
   return deleted;
 }
 
-// Fetch the content_hash and system_modstamp for a batch of IDs (used to skip re-embedding).
+/** Fetch hashes and modification stamps for a batch of IDs to detect unchanged records. */
 export async function getExistingHashes(
   db: D1Database,
   ids: string[],
@@ -142,7 +142,7 @@ export async function getExistingHashes(
   );
 }
 
-// Load a batch of full records by ID (used by search() to fetch display content).
+/** Load full records by ID for search-result hydration. */
 export async function getRecordsByIds(db: D1Database, ids: string[]): Promise<StoredRecord[]> {
   if (ids.length === 0) return [];
   const normalized = ids.map(toSfId15);
@@ -154,7 +154,7 @@ export async function getRecordsByIds(db: D1Database, ids: string[]): Promise<St
   return results.map(rowToStored);
 }
 
-// Fetch one full record by ID.
+/** Fetch one full record by ID. */
 export async function getRecordById(db: D1Database, id: string): Promise<StoredRecord | null> {
   const row = await db
     .prepare(`SELECT * FROM records WHERE sf_id = ? LIMIT 1`)
@@ -163,7 +163,7 @@ export async function getRecordById(db: D1Database, id: string): Promise<StoredR
   return row ? rowToStored(row) : null;
 }
 
-// The number of records indexed for each object type.
+/** Return discovery metadata and record counts for each indexed object type. */
 export async function listObjectInfo(db: D1Database): Promise<SalesforceObjectInfo[]> {
   const { results } = await db
     .prepare(
@@ -183,7 +183,7 @@ export async function listObjectInfo(db: D1Database): Promise<SalesforceObjectIn
   });
 }
 
-// Read the per-object sync cursor.
+/** Read the per-object sync cursor. */
 export async function getCursor(db: D1Database, objectType: string): Promise<string | null> {
   const row = await db
     .prepare(`SELECT last_modstamp FROM sync_cursor WHERE object_type = ?`)
@@ -192,7 +192,7 @@ export async function getCursor(db: D1Database, objectType: string): Promise<str
   return row?.last_modstamp ?? null;
 }
 
-// Write the per-object sync cursor.
+/** Write the per-object sync cursor. */
 export async function setCursor(
   db: D1Database,
   objectType: string,
@@ -212,7 +212,7 @@ export async function setCursor(
     .run();
 }
 
-// Enable/disable an object type's sync, or add a new one with default fields.
+/** Seed missing object configurations without overwriting operator settings. */
 export async function ensureObjectConfig(db: D1Database, configs: ObjectTypeConfig[]): Promise<void> {
   const stmt = db.prepare(
     `INSERT OR IGNORE INTO object_config (object_type, enabled, soql_fields, embed_fields, display_name_field)
@@ -229,7 +229,7 @@ export async function ensureObjectConfig(db: D1Database, configs: ObjectTypeConf
   await db.batch(batch);
 }
 
-// Load enabled object configs (falling back to the built-in default set).
+/** Load enabled object configurations, falling back to the built-in default set. */
 export async function loadObjectConfigs(db: D1Database): Promise<ObjectTypeConfig[]> {
   const { results } = await db
     .prepare(`SELECT * FROM object_config WHERE enabled = 1`)
@@ -262,7 +262,7 @@ export async function loadObjectConfigs(db: D1Database): Promise<ObjectTypeConfi
   });
 }
 
-// Convert a stored record to the agent-facing SalesforceRecord shape.
+/** Convert a stored record to the agent-facing SalesforceRecord shape. */
 export function storedToSalesforceRecord(stored: StoredRecord): SalesforceRecord {
   return {
     id: stored.sf_id,
@@ -274,7 +274,7 @@ export function storedToSalesforceRecord(stored: StoredRecord): SalesforceRecord
   };
 }
 
-// Convert stored records + vector metadata to search results.
+/** Convert stored records and vector scores to search results. */
 export function storedToSearchResults(
   stored: StoredRecord[],
   scores: Map<string, number>,

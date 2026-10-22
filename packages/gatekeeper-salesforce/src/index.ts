@@ -7,7 +7,7 @@ export {
   GatekeeperVendor, SalesforceAccount, SalesforceVerifier,
 } from "./salesforce-gatekeeper.js";
 
-// Keep ES Module worker format; this worker is used over RPC/Workflows, not HTTP.
+/** Serve a plain health response; application access uses RPC and Workflows. */
 export default {
   async fetch(): Promise<Response> {
     return new Response("Salesforce gatekeeper worker is running.", {

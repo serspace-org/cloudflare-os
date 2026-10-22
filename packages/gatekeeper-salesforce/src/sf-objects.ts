@@ -7,26 +7,25 @@
 
 import type { SfJson, SfRecord, SalesforceVectorMetadata } from "./salesforce-types.js";
 
-// Default configuration for a known object type.
+/** Default configuration for a known object type. */
 export type ObjectTypeConfig = {
   objectType: string;
   title: string;
   description?: string;
-  // SOQL field API names selected from the object.
+  /** SOQL field API names selected from the object. */
   soqlFields: string[];
-  // The subset of soqlFields included in the embedding text. Id + SystemModstamp are always added.
+  /** The subset of soqlFields included in the embedding text. Id + SystemModstamp are always added. */
   embedFields: string[];
-  // The field carrying the record's display name ("Name" for most objects).
+  /** The field carrying the record's display name ("Name" for most objects). */
   displayField?: string;
-  // Field names the common metadata extractor should look for (first match wins). Only these
-  // become indexed Vectorize metadata, so keep them few and short.
+  /** Field supplying the owner metadata used by Vectorize filters. */
   ownerField?: string;
   campaignField?: string;
   statusField?: string;
   enabled?: boolean;
 };
 
-// The default object set. Field names are the canonical Touchless org names (standard + custom).
+/** The default object set, using standard and custom field names from the Touchless org. */
 export const OBJECT_TYPE_CONFIGS: ObjectTypeConfig[] = [
   {
     objectType: "Account",
@@ -205,8 +204,7 @@ export const OBJECT_TYPE_CONFIGS: ObjectTypeConfig[] = [
   },
 ];
 
-// Relationship fields (traversal notation, e.g. "Account.Name") resolve against related records
-// that Salesforce returns inline. Any field with a "." is left as-is for SOQL.
+/** Build the SOQL field list, retaining relationship traversal notation for inline related records. */
 export function fieldList(config: ObjectTypeConfig): string[] {
   const set = new Set<string>([
     "Id",
@@ -217,9 +215,7 @@ export function fieldList(config: ObjectTypeConfig): string[] {
   return [...set];
 }
 
-// Concise human-readable label for one field value. Relationship traversal ("Owner.Name") becomes
-// "Owner Name"; underscored custom/reference field suffixes are stripped; interior runs of
-// whitespace collapse.
+/** Format a human-readable label, stripping custom suffixes and expanding relationship notation. */
 export function fieldLabel(field: string): string {
   const label = field
     .replace(/__[cr](?=\.|$)/gi, "")
@@ -250,8 +246,7 @@ export function resolveFieldValue(record: SfRecord, fieldPath: string): SfJson |
   return current;
 }
 
-// Serialize one record into a single searchable text line. `embedFields` from the config pick the
-// meaningful fields; everything else is skipped so long custom-field dumps don't bloat the vector.
+/** Serialize configured embedding fields into one searchable text line. */
 export function serializeRecord(
   record: SfRecord,
   config: ObjectTypeConfig,
@@ -276,8 +271,7 @@ export function serializeRecord(
   return { name, searchText: `${config.objectType}: ${name}. ${parts.join(". ")}`.trim() };
 }
 
-// Extract the brief indexed metadata for Vectorize. Each value must fit the metadata index budget
-// (<=64 bytes each); long values are truncated.
+/** Extract brief indexed metadata for Vectorize, truncating long values. */
 export function extractMetadata(
   record: SfRecord,
   config: ObjectTypeConfig,
@@ -298,7 +292,7 @@ export function extractMetadata(
   };
 }
 
-// A stable content hash used to detect unchanged records and skip re-embedding.
+/** Compute a stable content hash to detect unchanged records and skip re-embedding. */
 export async function contentHash(searchText: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(searchText));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");

@@ -89,6 +89,14 @@ test("every $-token in binding templates and vars uses known placeholder syntax"
   }
 });
 
+test("Salesforce workflow schedules survive the generated-config export layout", () => {
+  const { workers } = buildTestManifest();
+  assert.deepEqual(workers["gatekeeper-salesforce"].bindings.find((b) => b.name === "SF_SYNC"), {
+    type: "workflow", name: "SF_SYNC", class_name: "SalesforceSyncWorkflow",
+    schedules: ["0 */2 * * *"],
+  });
+});
+
 test("worker entries carry the deploy contract", () => {
   const manifest = buildTestManifest();
   const { workers } = manifest;

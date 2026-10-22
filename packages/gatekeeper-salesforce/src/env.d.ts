@@ -13,11 +13,4 @@ declare namespace Cloudflare {
     SF_BACKEND_URL?: string;
   }
 
-  interface GlobalProps {
-    // Populates Cloudflare.Exports, the type of ctx.exports.
-    mainModule: typeof import("./index.js");
-    // Storage classes exposed as DO namespaces on ctx.exports.
-    durableNamespaces:
-      | "SalesforceGatekeeper";
-  }
 }

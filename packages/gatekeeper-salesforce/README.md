@@ -94,9 +94,9 @@ npx wrangler d1 create salesforce-vector-store
 npx wrangler d1 migrations apply salesforce-vector-store --remote
 ```
 
-Then point `wrangler.jsonc` `d1_databases[0].database_id` and `vectorize[0].index_name` at the
-created resources (the committed file uses `$D1_SF_DB_ID` / `$VECTORIZE_SF_INDEX_NAME`
-placeholders that the release manifest / deploy service resolves).
+Then configure the D1 ID and Vectorize index name in `cloudflare.config.ts` and run
+`pnpm configs:generate`. The release manifest emits `$D1_SF_DB_ID` and `$VECTORIZE_SF_INDEX_NAME`
+placeholders; deploy-service support for provisioning and resolving these must be verified separately.
 
 ### 4. Deploy + first sync
 
@@ -124,13 +124,14 @@ registry and re-run the seed step — no code change is needed for standard dosi
 
 ```sh
 pnpm --filter @gadgets/gatekeeper-salesforce... install
-pnpm --filter @gadgets/gatekeeper-salesforce test    # unit + D1 integration tests
+pnpm --filter @gadgets/gatekeeper-salesforce test:run # unit + D1 integration tests
 pnpm --filter @gadgets/gatekeeper-salesforce build   # typecheck
 ```
 
 The dev server (`pnpm dev-server`) auto-discovers the gatekeeper and binds `GATEKEEPER_SALESFORCE`.
-For local dev, `wrangler.jsonc` uses `preview_database_id: "salesforce-vector-store"` and the same
-index name, so `wrangler dev` works against local D1 + Vectorize once you create them.
+Worker settings are authored in `cloudflare.config.ts`; regenerate `wrangler.jsonc` with
+`pnpm configs:generate` after changing them. The D1 integration tests use an isolated local database;
+they do not require Salesforce credentials or a deployed Vectorize index.
 
 ## Security notes
 
@@ -143,8 +144,8 @@ index name, so `wrangler dev` works against local D1 + Vectorize once you create
 
 Adding this package touched the release manifest:
 
-- `scripts/release/manifest-lib.mjs` now understands `d1_databases`, `vectorize`, `ai`, and
+- `scripts/release/manifest-lib.ts` understands `d1_databases`, `vectorize`, `ai`, and
   `workflows` config keys, emitting `$D1_<BINDING>_ID`, `$VECTORIZE_<BINDING>_NAME`, `ai`, and
   `workflow` binding templates. `gatekeeper-salesforce` is in `NO_DEFAULT_CRED_INPUTS` (it takes
   `SF_*` secrets via `deploy-inputs.json`).
-- `scripts/testdata/golden-manifest.json` was regenerated with the new package entry.
+- `scripts/release/testdata/golden-manifest.json` includes the package entry.

@@ -7,8 +7,7 @@ export const EMBEDDING_DIMENSIONS = 1024;
 
 export type EmbeddingInput = { text: string; id?: string };
 
-// Runs the embedding model over a batch of strings, returning an embedding array aligned with the
-// input order. Tolerates a provider returning extra fields alongside the vectors.
+/** Run the embedding model over a batch of strings, returning vectors aligned with input order. */
 export async function embedBatch(
   ai: Ai,
   inputs: EmbeddingInput[],
@@ -31,15 +30,13 @@ export async function embedBatch(
   });
 }
 
-// Embeds a single text (used at query time). Returns a Float32Array (Vectorize accepts number[],
-// Float32Array, or Float64Array).
+/** Embed a single query as a Float32Array accepted by Vectorize. */
 export async function embedQuery(ai: Ai, text: string): Promise<Float32Array> {
   const [vec] = await embedBatch(ai, [{ text }]);
   return Float32Array.from(vec);
 }
 
-// Rough token guard: ~4 chars/token is a safe upper bound for English + identifiers. The model's
-// context window is 8192 tokens; we truncate well under that so batches behave predictably.
+/** Character guard for embedding inputs, kept below the model's context window. */
 export const MAX_CHARS_PER_INPUT = 16_000;
 
 export function truncateForEmbedding(text: string): string {

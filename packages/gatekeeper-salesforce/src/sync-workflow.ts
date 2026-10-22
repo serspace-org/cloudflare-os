@@ -35,7 +35,7 @@ import {
 import { obsContext } from "./observability.js";
 
 export type SalesforceSyncParams = {
-  // When set, sync only this object type (used by resync()); otherwise sync all enabled types.
+  /** When set, sync only this object type; otherwise sync all enabled types. */
   objectType?: string;
 };
 

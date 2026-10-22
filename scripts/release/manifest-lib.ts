@@ -119,6 +119,8 @@ export interface WranglerConfig {
   vectorize?: BindingDecl[];
   /** Workflow bindings and their worker-local entrypoint classes. */
   workflows?: { binding: string; class_name: string; schedules?: string[] }[];
+  /** Workflow definitions emitted by @cloudflare/config, including their schedules. */
+  exports?: Record<string, { type: "workflow"; name: string; schedules?: string | string[] }>;
   /** Worker Loader bindings (the Gadget sandbox). */
   worker_loaders?: BindingDecl[];
   /** Service bindings; targets become `$WORKER_NAME(<pkg>)` placeholders. */
@@ -269,7 +271,7 @@ const HANDLED_CONFIG_KEYS = new Set([
   // gatekeeper-context's Artifacts binding is closed-beta and cannot be provisioned in arbitrary
   // user accounts; it is dropped from customer manifests (the gatekeeper degrades gracefully).
   "artifacts",
-  "d1_databases", "vectorize", "workflows",
+  "d1_databases", "vectorize", "workflows", "exports",
 ]);
 
 const ARTIFACTS_CUT_ALLOWED = new Set(["gatekeeper-context"]);
@@ -467,9 +469,11 @@ export function buildWorkerEntry(
     bindings.push({ type: "ai", name: config.ai.binding });
   }
   for (const wf of config.workflows ?? []) {
+    const schedule = config.exports?.[wf.class_name]?.schedules ?? wf.schedules;
+    const schedules = typeof schedule === "string" ? [schedule] : schedule;
     bindings.push({
       type: "workflow", name: wf.binding, class_name: wf.class_name,
-      ...(wf.schedules?.length ? { schedules: wf.schedules } : {}),
+      ...(schedules?.length ? { schedules } : {}),
     });
   }
   for (const loader of config.worker_loaders ?? []) {
