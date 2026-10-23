@@ -86,6 +86,14 @@ export class FakeGatekeeperVerifier
 /** What each FakeGatekeeperAccount has been asked to do, by its `name` prop. */
 const accountCalls = new Map<string, string[]>();
 
+// Controlled remote describe() responses, including a barrier for account-mutation races.
+// Share flags rather than request-owned promises across the fixture's separate RPC I/O contexts.
+const accountDescriptions = new Map<string, {
+  description: AccountDescription | null;
+  started: boolean;
+  released: boolean;
+}>();
+
 /** A ticket a FakeGatekeeperAccount redeems when its UI is next opened, by account name. */
 const stashedTickets = new Map<string, string>();
 
@@ -105,6 +113,13 @@ export class FakeGatekeeperAccount extends WorkerEntrypoint<Cloudflare.Env, {
 
   async describe(): Promise<AccountDescription> {
     this.#record("describe");
+    const controlled = accountDescriptions.get(this.ctx.props.name);
+    if (controlled) {
+      controlled.started = true;
+      while (!controlled.released) await scheduler.wait(1);
+      if (controlled.description === null) throw new Error("describe failed");
+      return controlled.description;
+    }
     if (this.ctx.props.failDescribe) throw new Error("describe failed");
     return {
       displayName: this.ctx.props.name,
@@ -172,6 +187,20 @@ export class FakeGatekeeperAccount extends WorkerEntrypoint<Cloudflare.Env, {
 
 /** Test-only bridge to Workshop entrypoints that are otherwise reached through authenticated RPC. */
 export class GatekeeperUserPickerTestHooks extends DurableObject<Cloudflare.Env> {
+  setAccountDescription(name: string, description: AccountDescription | null, delayed = false): void {
+    accountDescriptions.set(name, {
+      description, started: false, released: !delayed,
+    });
+  }
+
+  async waitForAccountDescribe(name: string): Promise<void> {
+    while (!accountDescriptions.get(name)!.started) await scheduler.wait(1);
+  }
+
+  releaseAccountDescribe(name: string): void {
+    accountDescriptions.get(name)!.released = true;
+  }
+
   async createUser(userId: string, displayName: string): Promise<void> {
     const user = this.ctx.exports.UserDurableObject.getByName(userId);
     await user.authenticateFromCfAccess(userId, true);

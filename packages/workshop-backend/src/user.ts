@@ -1516,16 +1516,46 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async listProvidedAccounts(): Promise<ProvidedAccountInfo[]> {
     await this.#ensureAutoProvisionedAccounts();
+    await Promise.all([...this.#connectedAccountRecords()].map(rec => this.#refreshAccountUi(rec)));
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
       if (!rec.description.singleton && !rec.description.providesUi) continue;
+      if (config.disabledGatekeepers.includes(rec.vendorId)) continue;
       // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
       // or management UI. (Its data is preserved, so re-enabling restores it.)
       if (rec.autoProvisioned && ambientGatekeeperMode(config, rec.vendorId) === "disabled") continue;
       result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
     }
     return result;
+  }
+
+  // describe() is discovery, not consent: refresh only UI metadata, never grants or the singleton.
+  // Typed-storage subscribers run synchronously on every put/delete. Invalidate on *any* mutation
+  // during the remote await (including reconnect/revoke), without relying on RPC stub identity or
+  // holding the DO input gate across network I/O. Re-read the listing after all refreshes finish.
+  async #refreshAccountUi(record: ConnectedAccountRecord): Promise<void> {
+    let changed = false;
+    let invalidate = (current: ConnectedAccountRecord) => {
+      if (current.id === record.id) changed = true;
+    };
+    let subscriber = { add: invalidate, update: invalidate, remove: invalidate };
+    this.storage.connectedAccounts.subscribe(subscriber);
+    try {
+      let { providesUi } = await record.account.describe();
+      // Avoid notifying connected-account subscribers when presentation metadata is unchanged.
+      if (!changed && JSON.stringify(providesUi) !== JSON.stringify(record.description.providesUi)) {
+        this.storage.connectedAccounts.put({
+          ...record, description: { ...record.description, providesUi },
+        });
+      }
+    } catch (err) {
+      logger.warn("failed to refresh account UI metadata", {
+        event: "account.ui.refresh.failed", vendorId: record.vendorId, accountId: record.id, error: err,
+      });
+    } finally {
+      this.storage.connectedAccounts.unsubscribe(subscriber);
+    }
   }
 
   /**
