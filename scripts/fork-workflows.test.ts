@@ -9,6 +9,7 @@ const UPSTREAM_ONLY = [
   "bonk-pr.yml", "bonk.yml", "contribution-policy.yml",
   "preview.yml", "workshop-evals-pr.yml", "workshop-evals.yml",
 ];
+const FORK_ONLY = ["sync-upstream.yml"];
 
 interface Workflow {
   on: { push?: { branches?: string[] }; pull_request?: unknown };
@@ -21,8 +22,20 @@ const readWorkflow = (name: string): Workflow =>
 describe("Serspace fork workflow policy", () => {
   it("requires an explicit policy for every workflow, including upstream additions", () => {
     const workflows = readdirSync(".github/workflows").filter((name) => /\.ya?ml$/.test(name));
-    assert.deepEqual(workflows.toSorted(), [...SHARED, ...UPSTREAM_ONLY].toSorted());
+    assert.deepEqual(workflows.toSorted(), [...SHARED, ...UPSTREAM_ONLY, ...FORK_ONLY].toSorted());
   });
+
+  for (const name of FORK_ONLY) {
+    it(`restricts every job in ${name} to the Serspace fork`, () => {
+      const jobs = Object.entries(readWorkflow(name).jobs);
+      assert.ok(jobs.length > 0);
+      for (const [job, config] of jobs) {
+        const condition = (config.if ?? "").trim().replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+        const guard = "github.repository == 'serspace-org/cloudflare-os'";
+        assert.ok(condition === guard || condition.startsWith(`${guard} &&`), `${name}:${job} needs the fork guard first`);
+      }
+    });
+  }
 
   for (const name of UPSTREAM_ONLY) {
     it(`restricts every job in ${name} to the upstream repository`, () => {
