@@ -66,11 +66,11 @@ jobs:
   trust:
     name: Verify pull request
     if: >-
+      github.repository == 'cloudflare/cloudflare-os' &&
       github.event_name == 'pull_request' &&
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id &&
-      github.event.pull_request.user.type != 'Bot' &&
-      github.repository_owner == 'cloudflare'
+      github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -100,8 +100,8 @@ jobs:
     needs: trust
     # A push has no trust job to pass, so the skipped need has to be let through explicitly.
     if: >-
-      ${{ !cancelled() && (needs.trust.result == 'success' ||
-      (github.event_name == 'push' && github.repository_owner == 'cloudflare')) }}
+      ${{ github.repository == 'cloudflare/cloudflare-os' && !cancelled() &&
+      (needs.trust.result == 'success' || github.event_name == 'push') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -123,7 +123,7 @@ jobs:
           fetch-depth: 2
 
       - name: Set up Node.js
-        uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           run-install: false
@@ -147,7 +147,7 @@ jobs:
     name: Eval ${{ matrix.revision }}
     needs: plan
     # Explicit, or a push would skip this too: the implicit success() also covers the skipped trust.
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.legs != '' }}
+    if: ${{ github.repository == 'cloudflare/cloudflare-os' && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.legs != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -166,7 +166,7 @@ jobs:
         run: corepack enable
 
       - name: Set up Vite+, Node.js and dependencies
-        uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: true
@@ -232,7 +232,7 @@ jobs:
   store:
     name: Store ${{ matrix.revision }} ${{ matrix.task }}
     needs: [plan, evals]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.store != '' }}
+    if: ${{ github.repository == 'cloudflare/cloudflare-os' && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.store != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
@@ -277,7 +277,7 @@ jobs:
     needs: [plan, evals]
     # evals is skipped when every result is stored, and fails only when a leg could not run.
     if: >-
-      ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.report == 'true' &&
+      ${{ github.repository == 'cloudflare/cloudflare-os' && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.report == 'true' &&
       contains(fromJSON('["success", "skipped"]'), needs.evals.result) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -296,7 +296,7 @@ jobs:
         run: corepack enable
 
       - name: Set up Vite+, Node.js and dependencies
-        uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: true
@@ -375,7 +375,7 @@ jobs:
     needs: compare
     # Explicit: evals is skipped when every result is stored, and the implicit success() would skip
     # this with it.
-    if: ${{ !cancelled() && needs.compare.result == 'success' }}
+    if: ${{ github.repository == 'cloudflare/cloudflare-os' && !cancelled() && needs.compare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -424,7 +424,7 @@ jobs:
         run: corepack enable
 
       - name: Set up Vite+, Node.js and dependencies
-        uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: true
