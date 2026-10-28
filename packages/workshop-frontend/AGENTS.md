@@ -104,6 +104,14 @@ speculative reuse.
 
 Do not edit `src/routeTree.gen.ts`; it is generated.
 
+Gatekeeper management routes use navigation discovery metadata for their initial title, not a
+vendor-specific kernel mapping. `GatekeeperAppPage` keeps that header and a localized Kumo skeleton
+visible through `getGatekeeperApp` and the sandboxed document's load event, then hands the whole pane
+to the app (which owns its header and data-loading states). Document load is not a guarantee that
+app data is ready. Errors retain the header and are announced. Frame capabilities are route-owned,
+never cached across navigation, and disposed on teardown or late completion; discovery metadata does
+not replace the backend's access checks or the opaque-origin sandbox.
+
 ### Shared Code
 
 `src/components/` and `src/hooks/` are shared application infrastructure, not default destinations.
