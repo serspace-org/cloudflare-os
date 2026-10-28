@@ -25,7 +25,7 @@ import type {
 import SandboxedGatekeeperApp from "./SandboxedGatekeeperApp";
 import type GatekeeperUserPickerDialog from "./features/gatekeeper-sharing/GatekeeperUserPickerDialog";
 import type * as Kumo from "@cloudflare/kumo";
-import type { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api';
+import type { ConnectedAccountsFilter, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api';
 
 const connect = vi.hoisted(() => vi.fn<() => Promise<string>>(async () => 'opened'));
 vi.mock('./connectHandoff', () => ({ openConnectWindow: connect }));
@@ -77,19 +77,22 @@ const listWorkspaces = vi.fn<() => Promise<{ id: string; title: string }[]>>(asy
   { id: WORKSPACE_ID, title: "Daily Brief" },
 ]);
 let accounts: ConnectedAccountsSubscriber | undefined;
+let accountsFilter: ConnectedAccountsFilter | undefined;
 const subscriptionDisposed = vi.fn<() => void>();
 const ensureAccountResources = vi.fn<(id: number, patterns: string[]) => Promise<{ url: string, nonce: string } | null>>(async () => ({ url: 'https://consent.example', nonce: 'a'.repeat(64) }));
 const getGatekeeperApp = vi.fn<() => Promise<GatekeeperUiFrame>>(async () => ({ iframeHtml: '<!doctype html><title>Refreshed</title>', ui: new RpcStub(new EmptyUi()), workshopAccountId: 7 }));
 const authenticatedApi = {
   listWorkspaces, ensureAccountResources, getGatekeeperApp,
-  subscribeConnectedAccounts: (subscriber: ConnectedAccountsSubscriber) => {
+  subscribeConnectedAccounts: (subscriber: ConnectedAccountsSubscriber, filter?: ConnectedAccountsFilter) => {
     accounts = subscriber;
+    accountsFilter = filter;
     return Object.assign(Promise.resolve(), { [Symbol.dispose]: subscriptionDisposed });
   },
 };
 
-const MODEL_PATTERN = 'serspace://models/current';
-const publishAccount = (granted: string[] = [], id = 7, vendorId = 'scheduler') => {
+const MODEL_PATTERN = 'serspace://models/:accountRef';
+const publishAccount = (granted: string[] = [], id = 7, vendorId = 'scheduler', forced = false) => {
+  if (forced && !accountsFilter?.includeForcedAutoProvisionedAccounts) return;
   accounts!.add(id, { avatar: { url: '' }, displayName: 'App owner', grantedResourceUrlPatterns: granted },
     { displayName: 'Domain models', url: 'https://example.com' },
     [{ title: 'Domain models', description: 'Models', urlPattern: MODEL_PATTERN, grantable: true }], true, vendorId);
@@ -163,6 +166,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     connect.mockClear();
     connect.mockResolvedValue('opened');
     accounts = undefined;
+    accountsFilter = undefined;
   });
 
   afterEach(async () => {
@@ -229,12 +233,12 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await act(async () => { button.click(); await tick(); });
   };
 
-  const requestAccess = async () => {
+  const requestAccess = async (forced = false) => {
     let promise!: Promise<void>;
     await act(async () => { promise = host!.requestResourceAccess([MODEL_PATTERN]); await tick(); });
     // Tests attach rejection handlers before triggering cancellation/teardown.
     promise.catch(() => {});
-    await act(async () => { publishAccount(); accounts!.ready(); });
+    await act(async () => { publishAccount([], 7, 'scheduler', forced); accounts!.ready(); });
     return { promise };
   };
 
@@ -257,12 +261,70 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await act(async () => { publishAccount([MODEL_PATTERN]); await tick(); });
     await expect(promise).resolves.toBeUndefined();
     await expect(duplicate).resolves.toBeUndefined();
+    expect(subscriptionDisposed).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain('Allow app resource access?');
+    await act(async () => { publishAccount([], 8); accounts!.remove(8); });
     await act(async () => { await host!.refreshResourceAccess(); await tick(); });
     expect(getGatekeeperApp).toHaveBeenCalledExactlyOnceWith('scheduler');
     expect(container!.querySelector('iframe')!.srcdoc).toContain('Refreshed');
     expect(router.state.location.pathname).toBe('/');
     expect(router.state.location.search).toEqual({});
     expect(subscriptionDisposed).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes forced auto-provisioned app accounts in grant verification', async () => {
+    await mountApp(true);
+    const { promise } = await requestAccess(true);
+    expect(accountsFilter).toEqual({ includeForcedAutoProvisionedAccounts: true });
+    expect(ensureAccountResources).not.toHaveBeenCalled();
+    await click('Continue');
+    expect(ensureAccountResources).toHaveBeenCalledExactlyOnceWith(7, [MODEL_PATTERN]);
+    await act(async () => { publishAccount([MODEL_PATTERN], 7, 'scheduler', true); await tick(); });
+    await expect(promise).resolves.toBeUndefined();
+    await act(async () => { await host!.refreshResourceAccess(); await tick(); });
+    expect(container!.querySelector('iframe')!.srcdoc).toContain('Refreshed');
+  });
+
+  it.each(['revoked', 'removed'] as const)('invalidates staged access %s after the consent reply but before refresh', async (change) => {
+    const disposed = vi.fn<() => void>();
+    getGatekeeperApp.mockResolvedValueOnce({
+      iframeHtml: 'staged capability', workshopAccountId: 7,
+      ui: { [Symbol.dispose]: disposed } as unknown as GatekeeperUiFrame['ui'],
+    });
+    await mountApp(true);
+    const { promise } = await requestAccess();
+    await click('Continue');
+    await act(async () => { publishAccount([MODEL_PATTERN]); await tick(); });
+    await expect(promise).resolves.toBeUndefined();
+    expect(subscriptionDisposed).not.toHaveBeenCalled();
+    expect(disposed).not.toHaveBeenCalled();
+
+    await act(async () => {
+      if (change === 'revoked') publishAccount([]);
+      else accounts!.remove(7);
+    });
+    await expect(host!.refreshResourceAccess()).rejects.toThrow('No confirmed resource access');
+    expect(disposed).toHaveBeenCalledOnce();
+    expect(subscriptionDisposed).toHaveBeenCalledOnce();
+    expect(container!.querySelector('iframe')!.srcdoc).not.toContain('staged capability');
+  });
+
+  it('releases the retained watcher and staged capability on teardown before refresh', async () => {
+    const disposed = vi.fn<() => void>();
+    getGatekeeperApp.mockResolvedValueOnce({
+      iframeHtml: 'staged capability', workshopAccountId: 7,
+      ui: { [Symbol.dispose]: disposed } as unknown as GatekeeperUiFrame['ui'],
+    });
+    await mountApp(true);
+    const { promise } = await requestAccess();
+    await click('Continue');
+    await act(async () => { publishAccount([MODEL_PATTERN]); await tick(); });
+    await expect(promise).resolves.toBeUndefined();
+    expect(subscriptionDisposed).not.toHaveBeenCalled();
+    await act(async () => root!.unmount());
+    root = undefined;
+    expect(subscriptionDisposed).toHaveBeenCalledOnce();
+    expect(disposed).toHaveBeenCalledOnce();
   });
 
   it('cancels without requesting consent and rejects unsupported or unbound requests', async () => {

@@ -356,6 +356,7 @@ const GatekeeperAppSandbox = ({ frame, gatekeeperVendorId, onLoad, onAccessGrant
   const invalidatedRef = useRef(false)
   const [overlay, setOverlay] = useState<OverlayState>(null)
   const [resourceAccess, setResourceAccess] = useState<ResourceAccess | null>(null)
+  const [resourceAccessConfirmed, setResourceAccessConfirmed] = useState(false)
   const resourceAccessRef = useRef<ResourceAccess | null>(null)
   const refreshRef = useRef<(() => void) | null>(null)
   const refreshController = useRef<AbortController | null>(null)
@@ -377,6 +378,7 @@ const GatekeeperAppSandbox = ({ frame, gatekeeperVendorId, onLoad, onAccessGrant
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no })
     const request = { patterns, promise, resolve, reject, controller: new AbortController() }
     resourceAccessRef.current = request
+    setResourceAccessConfirmed(false)
     setResourceAccess(request)
     return promise
   }, [frame.workshopAccountId])
@@ -570,6 +572,7 @@ const GatekeeperAppSandbox = ({ frame, gatekeeperVendorId, onLoad, onAccessGrant
         accountId={frame.workshopAccountId}
         vendorId={gatekeeperVendorId}
         patterns={resourceAccess.patterns}
+        confirmed={resourceAccessConfirmed}
         onFinish={async (error) => {
           if (resourceAccessRef.current !== resourceAccess) return
           if (!error) {
@@ -585,13 +588,19 @@ const GatekeeperAppSandbox = ({ frame, gatekeeperVendorId, onLoad, onAccessGrant
             catch (caught) { error = caught instanceof Error ? caught : new Error('Could not refresh app access.') }
           }
           if (resourceAccessRef.current !== resourceAccess) return
-          resourceAccessRef.current = null
-          setResourceAccess(null)
           if (error) {
+            resourceAccessRef.current = null
+            setResourceAccess(null)
             resourceAccess.controller.abort()
+            refreshRef.current = null
+            refreshController.current = null
             resourceAccess.reject(error)
           }
-          else resourceAccess.resolve()
+          else {
+            // The RPC has finished, but retain its watcher until refresh consumes the staged frame.
+            setResourceAccessConfirmed(true)
+            resourceAccess.resolve()
+          }
         }}
       />}
       <iframe

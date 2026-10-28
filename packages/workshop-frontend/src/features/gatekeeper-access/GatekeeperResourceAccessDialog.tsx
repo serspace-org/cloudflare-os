@@ -10,11 +10,12 @@ type Props = {
   accountId: number
   vendorId: string
   patterns: string[]
+  confirmed: boolean
   onFinish: (error?: Error) => void
 }
 
 /** Consent is rendered by Workshop, outside the requesting opaque-origin frame. */
-export const GatekeeperResourceAccessDialog = ({ api, accountId, vendorId, patterns, onFinish }: Props) => {
+export const GatekeeperResourceAccessDialog = ({ api, accountId, vendorId, patterns, confirmed, onFinish }: Props) => {
   const [account, setAccount] = useState<AccountEvent | null>(null)
   const accountRef = useRef<AccountEvent | null>(null)
   const [waiting, setWaiting] = useState(false)
@@ -76,7 +77,7 @@ export const GatekeeperResourceAccessDialog = ({ api, accountId, vendorId, patte
         if (cancelled) return
         if (!accountRef.current) finish(new Error('The app connection is no longer available.'))
       },
-    }))
+    }), { includeForcedAutoProvisionedAccounts: true })
     subscription.catch(() => { if (!cancelled) finish(new Error('Could not verify the app connection.')) })
     return () => {
       cancelled = true
@@ -114,7 +115,8 @@ export const GatekeeperResourceAccessDialog = ({ api, accountId, vendorId, patte
     }
   }
 
-  if (!container) return null
+  // Keep watching the exact account between the consent reply and the frame's refresh acknowledgment.
+  if (!container || confirmed) return null
   return <Dialog.Root open onOpenChange={open => { if (!open) finish(new Error('Resource access cancelled.')) }}>
     <Dialog container={container} className="p-6">
       <Dialog.Title className="text-lg font-semibold">Allow app resource access?</Dialog.Title>
