@@ -1,0 +1,104 @@
+name: Sync upstream
+
+# Fork-only: rebases the serspace patch stack onto cloudflare/cloudflare-os main.
+#
+# mode=check (default): rebase in the runner, push the result as a sync/cloudflare-* branch,
+# and dispatch CI on it. serspace is not touched; promote by re-running with mode=apply.
+# mode=apply: same rebase, then force-push serspace (with lease) and dispatch CI on it.
+#
+# Conflicts are never auto-resolved: the run fails with the stopped commit and conflicted
+# files in the job summary, and the stack is resolved locally (see docs/fork-automation.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check: push a sync branch only. apply: force-push serspace."
+        type: choice
+        options: [check, apply]
+        default: check
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  rebase:
+    name: Rebase stack onto upstream
+    if: github.repository == 'serspace-org/cloudflare-os'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out serspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: serspace
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/cloudflare/cloudflare-os.git
+          git fetch --no-tags upstream main
+
+      - name: Rebase with autosquash
+        id: rebase
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          base="$(git rev-parse origin/serspace)"
+          upstream="$(git rev-parse upstream/main)"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "branch=sync/cloudflare-${base:0:8}-${upstream:0:8}" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$upstream" "$base"; then
+            echo "Already on top of upstream/main; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          if ! GIT_SEQUENCE_EDITOR=true git -c rerere.enabled=false -c core.editor=true \
+              rebase -i --autosquash upstream/main; then
+            {
+              echo "## Rebase conflict — resolve locally"
+              echo
+              echo "Stopped at: \`$(git rebase --show-current-patch 2>/dev/null | head -2 | tail -1 || echo unknown)\`"
+              echo
+              echo "Conflicted files:"
+              git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/'
+              echo
+              echo 'Run locally: `git fetch upstream && git rebase -i --autosquash upstream/main`,'
+              echo 'resolve inside the topic commit it stops on, test, then'
+              echo '`git push --force-with-lease origin serspace`.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git rebase --abort
+            exit 1
+          fi
+          {
+            echo "## Rebase clean"
+            echo
+            echo "Stack after rebase:"
+            git log --format='- `%h` %s' upstream/main..HEAD
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push sync branch and dispatch CI
+        if: steps.rebase.outputs.up_to_date == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="${{ steps.rebase.outputs.branch }}"
+          git push --force origin "HEAD:refs/heads/$branch"
+          # Pushes made with GITHUB_TOKEN do not trigger push workflows; dispatch CI explicitly.
+          gh workflow run ci.yml --ref "$branch"
+          echo "CI dispatched on \`$branch\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Promote to serspace
+        if: steps.rebase.outputs.up_to_date == 'false' && inputs.mode == 'apply'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push --force-with-lease=serspace:${{ steps.rebase.outputs.base }} origin HEAD:serspace
+          gh workflow run ci.yml --ref serspace
+          {
+            echo "## serspace updated"
+            echo
+            echo 'Team: `git fetch && git reset --hard origin/serspace`.'
+          } >> "$GITHUB_STEP_SUMMARY"
