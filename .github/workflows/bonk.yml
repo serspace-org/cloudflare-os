@@ -17,6 +17,7 @@ jobs:
   # `mentions:` input, so the job starts on the same comments the action would act on.
   bonk:
     if: >-
+      github.repository == 'cloudflare/cloudflare-os' &&
       github.event.sender.type != 'Bot' &&
       (contains(github.event.comment.body, '/bonk') ||
        contains(github.event.comment.body, '@ask-bonk'))

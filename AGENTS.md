@@ -77,6 +77,15 @@ Each Worker's `cloudflare.config.ts` (`@cloudflare/config` format, built from th
 
 ## Development checks
 
+### Serspace fork automation
+
+Cloudflare-only CLA, contribution policy, Bonk, previews and paid model-evaluation jobs must
+keep an exact `github.repository == 'cloudflare/cloudflare-os'` guard. Do not enable these
+jobs, sign contributor agreements, or bypass checks as part of an upstream sync. Keep quality
+CI enabled for pull requests and pushes to `serspace`. `scripts/fork-workflows.test.ts` checks
+these guards and requires every newly imported workflow to be classified before it can pass CI.
+See `docs/fork-automation.md` for the fork policy and the trusted-base rollout limitation.
+
 IMPORTANT: This repository uses pnpm, not npm. Always use pnpm.
 
 - Run `pnpm lint` before pushing; it includes script types, generated-config checks, and the workspace build.
