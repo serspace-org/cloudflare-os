@@ -58,7 +58,7 @@ function main() {
   const tree = join(scratch, "tree");
   let added = false;
   try {
-    git(root, ["worktree", "add", "--detach", tree, base]);
+    git(root, ["-c", `core.hooksPath=${hooks}`, "worktree", "add", "--detach", tree, base]);
     added = true;
     // Do not run repository hooks or prompt for signing during a merge check.
     const merge = git(tree, ["-c", `core.hooksPath=${hooks}`, "merge", "--no-commit", "--no-ff", upstream], [0, 1]);
@@ -77,7 +77,7 @@ function main() {
     git(tree, ["-c", `core.hooksPath=${hooks}`, "-c", "commit.gpgsign=false", "commit", "-m", "Merge cloudflare/cloudflare-os main into Serspace fork"]);
     const head = git(tree, ["rev-parse", "HEAD"]).output;
     // Create the named branch only after a successful merge commit.
-    git(tree, ["switch", "-c", branch]);
+    git(tree, ["-c", `core.hooksPath=${hooks}`, "switch", "-c", branch]);
     git(root, ["worktree", "move", tree, destination]);
     added = false;
     console.log(`Prepared branch: ${branch}\nWorktree: ${destination}\nMerge commit: ${head}`);

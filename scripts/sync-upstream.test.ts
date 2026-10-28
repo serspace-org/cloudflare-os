@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -117,4 +117,24 @@ test("missing refs or failed fetch are errors, not an up-to-date result", (t) =>
   assert.equal(run().status, 2);
   git("update-ref", "-d", "refs/remotes/upstream/main");
   assert.equal(run("--no-fetch").status, 2);
+});
+
+test("checkout hooks cannot run or leave stale registrations in either mode", (t) => {
+  const { repo, run, git, diverge } = fixture(t);
+  diverge();
+  const hooks = join(repo, "configured-hooks");
+  mkdirSync(hooks);
+  const marker = join(hooks, "executed");
+  const hook = join(hooks, "post-checkout");
+  writeFileSync(hook, '#!/bin/sh\ntouch "$(dirname "$0")/executed"\nexit 1\n');
+  chmodSync(hook, 0o755);
+  git("config", "core.hooksPath", hooks);
+  for (const args of [["--no-fetch"], ["--no-fetch", "--prepare"]]) {
+    const result = run(...args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(marker), false, "configured checkout hook must not execute");
+    const expectedWorktrees = args.includes("--prepare") ? 2 : 1;
+    assert.equal(git("worktree", "list", "--porcelain").match(/^worktree /gm)?.length, expectedWorktrees);
+    assert.equal(readdirSync(join(repo, ".worktrees")).length, expectedWorktrees - 1);
+  }
 });

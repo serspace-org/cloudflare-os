@@ -45,8 +45,9 @@ node scripts/sync-upstream.ts --prepare
 
 The script prints the new `sync/cloudflare-<fork SHA>-<upstream SHA>` branch,
 worktree path, and merge commit. It refuses to overwrite an existing candidate.
-Hooks and commit signing are disabled only for its merge/commit commands; a
-prepared commit uses your configured Git identity. No upstream application code
+Hooks are disabled for worktree creation, branch switching, merging, and
+committing; commit signing is disabled for the prepared commit, which uses your
+configured Git identity. No upstream application code
 is run during the rehearsal. Review before installing or testing upstream code.
 
 Exit codes: **0** = up to date or conflict-free; **1** = merge conflicts (file
