@@ -112,6 +112,17 @@ app data is ready. Errors retain the header and are announced. Frame capabilitie
 never cached across navigation, and disposed on teardown or late completion; discovery metadata does
 not replace the backend's access checks or the opaque-origin sandbox.
 
+Management apps can request additional access without agent chat using the private host's
+`requestResourceAccess(patterns)`, followed after successful resolution by
+`refreshResourceAccess()`. Patterns must exactly match the owning account's advertised grantable
+resource types. Workshop renders its own confirmation, invokes the existing resource-consent
+flow only after Continue, and waits for valid account grant metadata before obtaining a fresh
+app capability. The backend stamps the app's owning account; frames cannot select another one.
+The second call acknowledges the consent reply before iframe replacement. Cancellation stops
+local waiting, not access already approved in an external browser. Missing or invalid grants,
+removed/changed accounts and blocked popups fail closed; no implicit model or resource writes
+are performed. Keep this protocol covered alongside teardown and late-completion tests.
+
 ### Shared Code
 
 `src/components/` and `src/hooks/` are shared application infrastructure, not default destinations.
