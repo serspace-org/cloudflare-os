@@ -553,6 +553,9 @@ export interface ResourceConfiguratorHost extends RpcTarget {
  * apps (startAppUi, e.g. the Context Library file manager, hosted on its own Workshop page).
  */
 export type GatekeeperUiFrame = {
+  /** Workshop-owned connected account identity, set only by getGatekeeperApp, never by the app. */
+  workshopAccountId?: number;
+
   /** Complete HTML for the UI. Workshop hosts it in a sandboxed iframe. */
   iframeHtml: string;
 

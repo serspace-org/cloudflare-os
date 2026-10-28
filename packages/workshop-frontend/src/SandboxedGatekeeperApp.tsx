@@ -22,6 +22,19 @@ import {
   type GatekeeperAppWorkspaceTarget,
 } from './gatekeeperAppNavigation'
 import GatekeeperUserPickerDialog from './features/gatekeeper-sharing/GatekeeperUserPickerDialog'
+import { GatekeeperResourceAccessDialog } from './features/gatekeeper-access/GatekeeperResourceAccessDialog'
+
+type ResourceAccess = {
+  controller: AbortController
+  patterns: string[]
+  promise: Promise<void>
+  resolve: () => void
+  reject: (error: Error) => void
+}
+
+const disposeFrame = (frame: GatekeeperUiFrame | undefined) => {
+  (frame?.ui as { [Symbol.dispose]?(): void } | undefined)?.[Symbol.dispose]?.()
+}
 
 // The content-pane rect, in viewport coordinates, that the app pins its page to while the iframe
 // is full-viewport.
@@ -103,6 +116,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
   readonly #resolveWorkspaceTitles: ResolveWorkspaceTitles
   readonly #openUserPicker: OpenUserPicker
   readonly #cancelUserPicker: CancelUserPicker
+  readonly #requestResourceAccess: (patterns: string[]) => Promise<void>
+  readonly #cancelResourceAccess: () => void
+  readonly #refreshResourceAccess: () => void
   #presenting = false
   #theme: GatekeeperAppTheme
   #themeReceiver: RpcStub<GatekeeperAppThemeReceiver> | null = null
@@ -120,6 +136,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
     resolveWorkspaceTitles: ResolveWorkspaceTitles,
     openUserPicker: OpenUserPicker,
     cancelUserPicker: CancelUserPicker,
+    requestResourceAccess: (patterns: string[]) => Promise<void>,
+    cancelResourceAccess: () => void,
+    refreshResourceAccess: () => void,
   ) {
     super()
     this.#theme = theme
@@ -138,6 +157,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
     this.#resolveWorkspaceTitles = resolveWorkspaceTitles
     this.#openUserPicker = openUserPicker
     this.#cancelUserPicker = cancelUserPicker
+    this.#requestResourceAccess = requestResourceAccess
+    this.#cancelResourceAccess = cancelResourceAccess
+    this.#refreshResourceAccess = refreshResourceAccess
   }
 
   get ui(): RpcStub<RpcTarget> {
@@ -161,6 +183,20 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   openPrompt(prompt: string): void {
     this.#openPrompt(normalizeGatekeeperAppPrompt(prompt))
+  }
+
+  // The frame names only resource types. Workshop fixes the owning account and obtains consent.
+  requestResourceAccess(patterns: string[]): Promise<void> {
+    if (!Array.isArray(patterns) || patterns.length === 0 || patterns.length > 20 ||
+        patterns.some(pattern => typeof pattern !== 'string' || !pattern || pattern.length > 2048)) {
+      throw new TypeError('Invalid resource access request.')
+    }
+    return this.#requestResourceAccess([...new Set(patterns)].toSorted())
+  }
+
+  // A separate message acknowledges receipt of the consent result before its transport is closed.
+  refreshResourceAccess(): void {
+    this.#refreshResourceAccess()
   }
 
   // Open the trusted Workshop-owned person picker over the app. The directory search happens in the
@@ -243,6 +279,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
   dispose() {
     this.#disposeRateLimiter()
     this.#cancelUserPicker()
+    this.#cancelResourceAccess()
     this.#themeReceiver?.[Symbol.dispose]?.()
     this.#themeReceiver = null
     if (this.#frameId !== null) {
@@ -264,10 +301,52 @@ class GatekeeperAppHostImpl extends RpcTarget {
  * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
  * The iframe fills its parent container.
  */
-export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
+export default function SandboxedGatekeeperApp(props: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
+  onLoad?: () => void,
 }) {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const [replacement, setReplacement] = useState<{ original: GatekeeperUiFrame, frame: GatekeeperUiFrame, generation: number } | null>(null)
+  const generation = useRef(0)
+  const current = replacement?.original === props.frame ? replacement.frame : props.frame
+  const active = useRef(true)
+  useEffect(() => {
+    active.current = true
+    return () => { active.current = false }
+  }, [])
+  useEffect(() => () => { disposeFrame(replacement?.frame) }, [replacement])
+  return <GatekeeperAppSandbox
+    key={current === props.frame ? 'original' : replacement!.generation}
+    {...props}
+    frame={current}
+    onAccessGranted={async (signal) => {
+      const next = await authenticatedApi.getGatekeeperApp(props.gatekeeperVendorId)
+      if (!next) throw new Error('The app is no longer available.')
+      if (!active.current || signal.aborted || next.workshopAccountId !== current.workshopAccountId) {
+        disposeFrame(next)
+        throw new Error('The app connection changed. Reopen the app to continue.')
+      }
+      let consumed = false
+      const discard = () => { if (!consumed) { consumed = true; disposeFrame(next) } }
+      signal.addEventListener('abort', discard, { once: true })
+      return () => {
+        if (consumed) return
+        consumed = true
+        signal.removeEventListener('abort', discard)
+        if (active.current && !signal.aborted) setReplacement({ original: props.frame, frame: next, generation: ++generation.current })
+        else disposeFrame(next)
+      }
+    }}
+  />
+}
+
+const GatekeeperAppSandbox = ({ frame, gatekeeperVendorId, onLoad, onAccessGranted }: {
+  frame: GatekeeperUiFrame,
+  gatekeeperVendorId: string,
+  onLoad?: () => void,
+  onAccessGranted: (signal: AbortSignal) => Promise<() => void>,
+}) => {
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -276,6 +355,41 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   const connectedRef = useRef(false)
   const invalidatedRef = useRef(false)
   const [overlay, setOverlay] = useState<OverlayState>(null)
+  const [resourceAccess, setResourceAccess] = useState<ResourceAccess | null>(null)
+  const resourceAccessRef = useRef<ResourceAccess | null>(null)
+  const refreshRef = useRef<(() => void) | null>(null)
+  const refreshController = useRef<AbortController | null>(null)
+  const refreshResourceAccess = useCallback(() => {
+    const refresh = refreshRef.current
+    if (!refresh) throw new Error('No confirmed resource access is ready to refresh.')
+    refreshRef.current = null
+    refresh()
+  }, [])
+  const requestResourceAccess = useCallback((patterns: string[]) => {
+    if (frame.workshopAccountId === undefined) return Promise.reject(new Error('App resource access is unavailable.'))
+    const pending = resourceAccessRef.current
+    if (pending) return JSON.stringify(pending.patterns) === JSON.stringify(patterns)
+      ? pending.promise : Promise.reject(new Error('A resource access request is already open.'))
+    refreshController.current?.abort()
+    refreshRef.current = null
+    let resolve!: () => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no })
+    const request = { patterns, promise, resolve, reject, controller: new AbortController() }
+    resourceAccessRef.current = request
+    setResourceAccess(request)
+    return promise
+  }, [frame.workshopAccountId])
+  const cancelResourceAccess = useCallback(() => {
+    const pending = resourceAccessRef.current
+    resourceAccessRef.current = null
+    setResourceAccess(null)
+    pending?.controller.abort()
+    refreshController.current?.abort()
+    refreshController.current = null
+    refreshRef.current = null
+    pending?.reject(new Error('Resource access cancelled.'))
+  }, [])
   // The open picker owns the receiver dup and settles `selectUsers()` on close or cancellation.
   // State drives rendering; the ref lets callbacks check identity before settling, so late
   // callbacks from a cancelled picker cannot close a newly opened picker.
@@ -410,6 +524,9 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
         resolveWorkspaceTitles,
         openUserPicker,
         cancelUserPicker,
+        requestResourceAccess,
+        cancelResourceAccess,
+        refreshResourceAccess,
       )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
@@ -443,13 +560,44 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
   }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, cancelUserPicker, openPrompt, openTarget,
-      openUserPicker, present, resolveWorkspaceTitles, setOverlayPhase])
+      openUserPicker, present, resolveWorkspaceTitles, setOverlayPhase, requestResourceAccess,
+      cancelResourceAccess, refreshResourceAccess])
 
   return (
     <>
+      {resourceAccess && frame.workshopAccountId !== undefined && <GatekeeperResourceAccessDialog
+        api={authenticatedApi}
+        accountId={frame.workshopAccountId}
+        vendorId={gatekeeperVendorId}
+        patterns={resourceAccess.patterns}
+        onFinish={async (error) => {
+          if (resourceAccessRef.current !== resourceAccess) return
+          if (!error) {
+            try {
+              const refresh = await onAccessGranted(resourceAccess.controller.signal)
+              if (resourceAccessRef.current !== resourceAccess) {
+                resourceAccess.controller.abort()
+                return
+              }
+              refreshRef.current = refresh
+              refreshController.current = resourceAccess.controller
+            }
+            catch (caught) { error = caught instanceof Error ? caught : new Error('Could not refresh app access.') }
+          }
+          if (resourceAccessRef.current !== resourceAccess) return
+          resourceAccessRef.current = null
+          setResourceAccess(null)
+          if (error) {
+            resourceAccess.controller.abort()
+            resourceAccess.reject(error)
+          }
+          else resourceAccess.resolve()
+        }}
+      />}
       <iframe
         ref={iframeRef}
         srcDoc={frame.iframeHtml}
+        onLoad={onLoad}
         // allow-scripts: run the app's JS. allow-modals: its beforeunload unsaved-changes guard. Not
         // allow-same-origin (the frame stays an opaque origin), and the app's CSP keeps connect-src 'none'.
         sandbox="allow-scripts allow-modals"

@@ -25,6 +25,10 @@ import type {
 import SandboxedGatekeeperApp from "./SandboxedGatekeeperApp";
 import type GatekeeperUserPickerDialog from "./features/gatekeeper-sharing/GatekeeperUserPickerDialog";
 import type * as Kumo from "@cloudflare/kumo";
+import type { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api';
+
+const connect = vi.hoisted(() => vi.fn<() => Promise<string>>(async () => 'opened'));
+vi.mock('./connectHandoff', () => ({ openConnectWindow: connect }));
 
 // Most host cases use callback controls; the replacement race exercises the real picker state.
 type PickerProps = ComponentProps<typeof GatekeeperUserPickerDialog>;
@@ -52,7 +56,7 @@ function DialogPart({ children }: { children?: ReactNode }) {
 
 vi.mock("@cloudflare/kumo", async (importOriginal) => {
   const actual = await importOriginal<typeof Kumo>();
-  return { ...actual, Dialog: Object.assign(DialogPart, { Root: DialogPart, Title: DialogPart }) };
+  return { ...actual, Dialog: Object.assign(DialogPart, { Root: DialogPart, Title: DialogPart, Description: DialogPart }) };
 });
 
 vi.mock("./ThemeContext", () => ({
@@ -72,7 +76,24 @@ const WORKSPACE_ID = "a".repeat(64);
 const listWorkspaces = vi.fn<() => Promise<{ id: string; title: string }[]>>(async () => [
   { id: WORKSPACE_ID, title: "Daily Brief" },
 ]);
-const authenticatedApi = { listWorkspaces };
+let accounts: ConnectedAccountsSubscriber | undefined;
+const subscriptionDisposed = vi.fn<() => void>();
+const ensureAccountResources = vi.fn<(id: number, patterns: string[]) => Promise<{ url: string, nonce: string } | null>>(async () => ({ url: 'https://consent.example', nonce: 'a'.repeat(64) }));
+const getGatekeeperApp = vi.fn<() => Promise<GatekeeperUiFrame>>(async () => ({ iframeHtml: '<!doctype html><title>Refreshed</title>', ui: new RpcStub(new EmptyUi()), workshopAccountId: 7 }));
+const authenticatedApi = {
+  listWorkspaces, ensureAccountResources, getGatekeeperApp,
+  subscribeConnectedAccounts: (subscriber: ConnectedAccountsSubscriber) => {
+    accounts = subscriber;
+    return Object.assign(Promise.resolve(), { [Symbol.dispose]: subscriptionDisposed });
+  },
+};
+
+const MODEL_PATTERN = 'serspace://models/current';
+const publishAccount = (granted: string[] = [], id = 7, vendorId = 'scheduler') => {
+  accounts!.add(id, { avatar: { url: '' }, displayName: 'App owner', grantedResourceUrlPatterns: granted },
+    { displayName: 'Domain models', url: 'https://example.com' },
+    [{ title: 'Domain models', description: 'Models', urlPattern: MODEL_PATTERN, grantable: true }], true, vendorId);
+};
 
 vi.mock("./AuthContext", () => ({
   useAuthenticatedApi: () => ({ authenticatedApi }),
@@ -90,6 +111,8 @@ interface TestHost extends RpcTarget {
   resolveWorkspaceTitles(ids: string[]): Promise<(string | null)[]>;
   openPrompt(prompt: string): Promise<void>;
   selectUsers(receiver: GatekeeperUserSelectionReceiver | string): Promise<void>;
+  requestResourceAccess(patterns: string[]): Promise<void>;
+  refreshResourceAccess(): Promise<void>;
 }
 
 class EmptyUi extends RpcTarget {}
@@ -131,7 +154,15 @@ describe("SandboxedGatekeeperApp navigation", () => {
   let host: RpcStub<TestHost> | undefined;
 
   beforeEach(() => {
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
     listWorkspaces.mockClear();
+    ensureAccountResources.mockClear();
+    ensureAccountResources.mockResolvedValue({ url: 'https://consent.example', nonce: 'a'.repeat(64) });
+    getGatekeeperApp.mockClear();
+    subscriptionDisposed.mockClear();
+    connect.mockClear();
+    connect.mockResolvedValue('opened');
+    accounts = undefined;
   });
 
   afterEach(async () => {
@@ -144,10 +175,11 @@ describe("SandboxedGatekeeperApp navigation", () => {
   });
 
   // Mount the host under a router and complete the iframe's handshake, leaving `host` connected.
-  async function mountApp() {
+  async function mountApp(withAccount = false) {
     const frame = {
       iframeHtml: "<!doctype html><title>Scheduler</title>",
       ui: new RpcStub(new EmptyUi()),
+      ...(withAccount ? { workshopAccountId: 7 } : {}),
     } as unknown as GatekeeperUiFrame;
     const rootRoute = createRootRoute({
       component: () => <SandboxedGatekeeperApp frame={frame} gatekeeperVendorId="scheduler" />,
@@ -190,6 +222,149 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await tick();
     return done;
   }
+
+  const click = async (label: string) => {
+    const button = [...document.querySelectorAll('button')].find(candidate => candidate.textContent === label);
+    if (!button) throw new Error(`Missing ${label} button`);
+    await act(async () => { button.click(); await tick(); });
+  };
+
+  const requestAccess = async () => {
+    let promise!: Promise<void>;
+    await act(async () => { promise = host!.requestResourceAccess([MODEL_PATTERN]); await tick(); });
+    // Tests attach rejection handlers before triggering cancellation/teardown.
+    promise.catch(() => {});
+    await act(async () => { publishAccount(); accounts!.ready(); });
+    return { promise };
+  };
+
+  it('requires trusted confirmation, scopes consent to the owning account, waits for its grant, and refreshes', async () => {
+    const { router } = await mountApp(true);
+    const { promise } = await requestAccess();
+    expect(document.body.textContent).toContain('Allow app resource access?');
+    expect(document.body.textContent).toContain('App owner');
+    expect(ensureAccountResources).not.toHaveBeenCalled();
+    let duplicate!: Promise<void>;
+    await act(async () => { duplicate = host!.requestResourceAccess([MODEL_PATTERN, MODEL_PATTERN]); await tick(); });
+    await expect(host!.requestResourceAccess(['unrelated://*'])).rejects.toThrow('already open');
+    await click('Continue');
+    expect(ensureAccountResources).toHaveBeenCalledExactlyOnceWith(7, [MODEL_PATTERN]);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(await settled(promise)).toBe(false);
+    await act(async () => { publishAccount([MODEL_PATTERN], 8); });
+    expect(await settled(promise)).toBe(false);
+    expect(getGatekeeperApp).not.toHaveBeenCalled();
+    await act(async () => { publishAccount([MODEL_PATTERN]); await tick(); });
+    await expect(promise).resolves.toBeUndefined();
+    await expect(duplicate).resolves.toBeUndefined();
+    await act(async () => { await host!.refreshResourceAccess(); await tick(); });
+    expect(getGatekeeperApp).toHaveBeenCalledExactlyOnceWith('scheduler');
+    expect(container!.querySelector('iframe')!.srcdoc).toContain('Refreshed');
+    expect(router.state.location.pathname).toBe('/');
+    expect(router.state.location.search).toEqual({});
+    expect(subscriptionDisposed).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels without requesting consent and rejects unsupported or unbound requests', async () => {
+    await mountApp(true);
+    const { promise } = await requestAccess();
+    await click('Cancel');
+    await expect(promise).rejects.toThrow('cancelled');
+    expect(ensureAccountResources).not.toHaveBeenCalled();
+    await expect(host!.requestResourceAccess([])).rejects.toThrow('Invalid resource');
+    let unsupported!: Promise<void>;
+    await act(async () => { unsupported = host!.requestResourceAccess(['serspace://*']); unsupported.catch(() => {}); await tick(); });
+    await act(async () => publishAccount());
+    await expect(unsupported).rejects.toThrow('unsupported resource');
+    expect(ensureAccountResources).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a grant for a no-op ensure response or an unrelated account update', async () => {
+    ensureAccountResources.mockResolvedValue(null);
+    await mountApp(true);
+    const { promise } = await requestAccess();
+    await click('Continue');
+    expect(await settled(promise)).toBe(false);
+    expect(connect).not.toHaveBeenCalled();
+    await act(async () => publishAccount([MODEL_PATTERN], 8));
+    expect(await settled(promise)).toBe(false);
+    await click('Cancel');
+    await expect(promise).rejects.toThrow('cancelled');
+    expect(getGatekeeperApp).not.toHaveBeenCalled();
+  });
+
+  it('rejects blocked popups and revocation without refreshing', async () => {
+    connect.mockRejectedValueOnce(new Error('Pop-up blocked.'));
+    await mountApp(true);
+    const first = await requestAccess();
+    await click('Continue');
+    await expect(first.promise).rejects.toThrow('Pop-up blocked');
+    const second = await requestAccess();
+    await click('Continue');
+    await act(async () => accounts!.remove(7));
+    await expect(second.promise).rejects.toThrow('removed');
+    await act(async () => publishAccount([MODEL_PATTERN]));
+    expect(getGatekeeperApp).not.toHaveBeenCalled();
+  });
+
+  it('does not open a late consent flow after cancellation or teardown', async () => {
+    let complete!: (value: { url: string, nonce: string }) => void;
+    ensureAccountResources.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    await mountApp(true);
+    const { promise } = await requestAccess();
+    await click('Continue');
+    await click('Cancel');
+    await expect(promise).rejects.toThrow('cancelled');
+    await act(async () => { complete({ url: 'https://late.example', nonce: 'b'.repeat(64) }); await tick(); });
+    expect(connect).not.toHaveBeenCalled();
+    const second = await requestAccess();
+    await act(async () => root!.unmount());
+    root = undefined;
+    await expect(second.promise).rejects.toThrow('Peer closed');
+    expect(getGatekeeperApp).not.toHaveBeenCalled();
+  });
+
+  it('fails closed without Workshop-owned account metadata', async () => {
+    await mountApp();
+    await expect(host!.requestResourceAccess([MODEL_PATTERN])).rejects.toThrow('unavailable');
+    await expect(host!.refreshResourceAccess()).rejects.toThrow('No confirmed resource access');
+    expect(ensureAccountResources).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh a different owning account', async () => {
+    const disposed = vi.fn<() => void>();
+    getGatekeeperApp.mockResolvedValueOnce({
+      iframeHtml: 'different account', workshopAccountId: 8,
+      ui: { [Symbol.dispose]: disposed } as unknown as GatekeeperUiFrame['ui'],
+    });
+    await mountApp(true);
+    const { promise } = await requestAccess();
+    await click('Continue');
+    await act(async () => { publishAccount([MODEL_PATTERN]); await tick(); });
+    await expect(promise).rejects.toThrow('connection changed');
+    expect(disposed).toHaveBeenCalledOnce();
+    expect(container!.querySelector('iframe')!.srcdoc).not.toContain('different account');
+  });
+
+  it('disposes a late refreshed capability after the user cancels', async () => {
+    let complete!: (frame: GatekeeperUiFrame) => void;
+    getGatekeeperApp.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const disposed = vi.fn<() => void>();
+    await mountApp(true);
+    const { promise } = await requestAccess();
+    await click('Continue');
+    await act(async () => { publishAccount([MODEL_PATTERN]); await tick(); });
+    await click('Cancel');
+    await expect(promise).rejects.toThrow('cancelled');
+    await act(async () => {
+      complete({ iframeHtml: 'late capability', workshopAccountId: 7,
+        ui: { [Symbol.dispose]: disposed } as unknown as GatekeeperUiFrame['ui'] });
+      await tick();
+    });
+    expect(disposed).toHaveBeenCalledOnce();
+    await expect(host!.refreshResourceAccess()).rejects.toThrow('No confirmed resource access');
+    expect(container!.querySelector('iframe')!.srcdoc).not.toContain('late capability');
+  });
 
   it("delivers each pick to the app's receiver while the picker is open, one picker at a time", async () => {
     await mountApp();

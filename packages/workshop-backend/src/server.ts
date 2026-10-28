@@ -656,7 +656,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let app = accounts.find(account => account.vendorId === vendorId && account.description.providesUi);
     if (!app) return null;
     // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
-    return user.startAccountAppUi(app.accountId, { isAdmin: this.#isAdmin() });
+    let frame = await user.startAccountAppUi(app.accountId, { isAdmin: this.#isAdmin() });
+    // Never accept an account identity asserted by the gatekeeper's frame.
+    return { ...frame, workshopAccountId: app.accountId };
   }
 
   async createGatekeeperUserSelection(
