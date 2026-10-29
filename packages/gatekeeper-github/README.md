@@ -7,7 +7,7 @@ This package provides GitHub OAuth integration for Gadgets. It serves two purpos
   to read the account's **primary verified email**, which becomes the user's identity. The sign-in
   grant is transient (discarded right after the email is read).
 - **Connections:** when a user connects GitHub (or signs in and later connects it), the full scopes
-  (`repo read:user user:email`) are requested so gadgets can access repositories, issues, and pull
+  (`repo read:user user:email project`) are requested so gadgets can access repositories, issues, projects, and pull
   requests on the user's behalf.
 
 > **Use a GitHub _OAuth App_, not a GitHub _App_.** Only OAuth Apps honor the OAuth `scope`
@@ -18,6 +18,177 @@ This package provides GitHub OAuth integration for Gadgets. It serves two purpos
 > permission — and even then login won't be minimal-scope. See [Using a GitHub App
 > instead](#using-a-github-app-instead) if you must.
 
+## Milestones and issue project data
+
+Issue and pull request summaries and `getDetails()` include `milestone`, with its number, title,
+description, state, progress counts, and due/closed dates. It is `null` when unassigned; cached results from older releases are invalidated on upgrade. Repository connections also expose `listMilestones()`
+(open and closed by default) and `getMilestone(number)`.
+Use `listIssues({ milestone: number, state: "all" })` to read the issues in a milestone,
+`milestone: "none"` for unassigned issues, or `milestone: "*"` for all assigned issues.
+The same filter is supported by `searchIssues()` and is checked after simulated edits.
+
+Issues and pull requests expose `listProjects()` for their Projects **v2** memberships, including
+archived items, and `listProjectFields(itemId)` for populated field values. Both are paginated
+cursors; continue until `next()` returns `null`, even after an empty page, and dispose them when
+finished. For example, with a repository connection named `GITHUB_REPO`:
+
+```ts
+using issue = await GITHUB_REPO.getIssue("42");
+const details = await issue.getDetails();
+using projects = await issue.listProjects();
+for (let page = await projects.next(); page !== null; page = await projects.next()) {
+  for (const item of page) {
+    using fields = await issue.listProjectFields(item.id);
+    for (let values = await fields.next(); values !== null; values = await fields.next()) {
+      // Inspect item.project, item.isArchived, and each field's name, dataType, and value.
+    }
+  }
+}
+```
+
+Decoded project values include text, numbers, dates, single-select (including Status), multi-select,
+and iteration values. Built-in labels, assignees, milestone, and repository fields point back to
+the corresponding issue/PR details. Other field types are explicitly tagged `unsupported`, rather
+than silently omitted. Unset values are absent. Project reads only expose the connected issue or
+PR's memberships and fields; they do not grant access to other project items or draft issues.
+Project membership remains read-only; issue/PR bindings can queue approved edits to existing items' custom field values (see below). Whole-project connections remain read-only.
+
+Existing OAuth connections must **reconnect** to grant `read:project` before reading projects.
+Ordinary issue, PR, and milestone reads do not require that scope. With a GitHub App, grant the
+corresponding Projects read permission instead; OAuth scopes do not configure App permissions.
+GitHub only returns projects the connected account can see. Permission failures and partial
+GraphQL errors fail the read instead of appearing as an empty project list. See GitHub's
+[Projects API guide](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects).
+
+Sharing verifies project access separately from repository access. Each newly read project is
+tracked durably, including reads still awaiting authorization; existing observers are checked
+before disclosure, and new observers must be able to read every tracked project. Project pages
+are read fresh rather than cached, and every page is authorized before the cursor advances.
+
+## Editing project fields on issues and pull requests
+
+`setProjectField(itemId, fieldId, value)` stages a `github.setProjectField` action. It **always
+requires explicit approval**, even if other issue edit kinds are auto-approved. The approval
+shows the project/item/field identity, previous and new values, and option/iteration definitions.
+No mutation is sent until approval. Rejecting a change removes its simulated value; undo restores
+the actual apply-time value, including clearing a previously unset field.
+
+Use `listProjectFieldDefinitions(itemId)` to discover all definitions, including unset fields,
+select options and current/completed iteration IDs. Both discovery and mutation are scoped to
+an existing item belonging to the connected issue/PR. Repository connections expose these methods
+on issues/PRs opened with `getIssue()`/`getPullRequest()` too. Project and repository identities
+and item ownership are revalidated before writing and undoing. Project ACL observation checks
+apply to definitions, staged previous values and simulated reads.
+
+```ts
+using issue = await env.GITHUB_REPO.getIssue("42");
+// Obtain itemId from issue.listProjects(), and fieldId/optionId from definitions.
+await issue.setProjectField(itemId, fieldId, { kind: "singleSelect", optionId });
+await issue.setProjectField(itemId, estimateFieldId, { kind: "number", number: 3 });
+await issue.setProjectField(itemId, targetDateFieldId, { kind: "date", date: "2026-12-01" });
+await issue.setProjectField(itemId, notesFieldId, { kind: "text", text: "Ready for review" });
+await issue.setProjectField(itemId, teamsFieldId, { kind: "multiSelect", optionIds });
+await issue.setProjectField(itemId, sprintFieldId, { kind: "iteration", iterationId });
+await issue.setProjectField(itemId, fieldId, null); // clear
+await issue.setMilestone(3); // existing approval-gated milestone assignment
+await issue.setMilestone(null); // remove milestone
+```
+
+All six custom field types supported by GitHub's `updateProjectV2ItemFieldValue` mutation are
+supported: text, finite numbers, valid date-only dates, single-select (including Status/Priority),
+multi-select, and iteration. Option and iteration IDs must belong to the selected field. Empty
+multi-select sets clear the value. A `null` value uses `clearProjectV2ItemFieldValue`.
+
+Derived project columns are issue properties, not editable custom fields: use `setTitle()`,
+`setMilestone()`, `setAssignees()`, `addLabels()` and `removeLabels()` on the issue. Repository,
+reviewers, linked PRs, calculated progress/timestamps and organization issue fields are not writable
+through this method. It does not change project membership, field definitions, milestone metadata
+(title/description/due date), or project-wide settings. Newly created provisional issues must first
+exist on GitHub and be added to a project before project fields can be edited; milestone assignments
+still work on provisional issues as before.
+
+**Permissions:** existing OAuth connections with only `read:project` must reconnect to grant
+`project` for writes. New connections request `project`; read-only tokens can still read. A GitHub
+App needs Projects **read and write** permission configured in the App and reauthorized; OAuth
+scopes do not configure App permissions. The connected account must be allowed to edit the project.
+Approval cannot elevate GitHub permissions. Milestone assignment uses repository write access.
+
+Undo/retries retain durable apply-time state across restarts and lost mutation replies. A fresh
+read detects later external edits and refuses to overwrite them. GitHub provides no atomic
+compare-and-swap for field values, so an edit between that read and the mutation remains a provider
+limitation. Read-back verification reports provider no-ops as errors rather than success.
+
+## Assigning milestones and assignees
+
+Issue and PR bindings expose `setMilestone(number | null)` and `setAssignees(logins)`.
+Milestones use their repository-local numbers; `null` clears the milestone. Assignees are GitHub
+logins without `@`, and replace the full set; `[]` clears everyone. Repository bindings expose
+`listAssignees()` to discover eligible users, alongside `listMilestones()`.
+
+```ts
+using issue = await env.GITHUB_REPO.getIssue("42");
+await issue.setMilestone(3);
+await issue.setAssignees(["octocat"]);
+```
+
+Assignment changes use the existing action approval flow, support undo, and appear in simulated
+issue/PR details and filters while pending. They also work on provisional issues before creation
+is approved; apply waits for the real GitHub number. The separate action kinds are
+`github.setMilestone` and `github.setAssignees`. Whole-project bindings remain read-only.
+
+GitHub requires repository write access for these changes. The connector validates the selected
+milestone and assignee eligibility before staging, and verifies GitHub's PATCH response so a
+silently ignored change is reported as an error rather than success. Undo restores the actual
+assignment read at apply time, with durable retry state for lost replies. It refuses to overwrite
+a different assignment found on a fresh read. GitHub's update API offers no atomic comparison
+for these fields, so an external edit between that read and PATCH remains a provider limitation.
+
+## Whole-project connections
+
+Connect an organization project at `https://github.com/orgs/OWNER/projects/NUMBER` or a user
+project at `https://github.com/users/OWNER/projects/NUMBER`. The project picker browses the
+chosen owner's visible projects with pagination. A connection grants one project; linked
+repositories and other projects remain separate connections.
+
+The `GitHubProject` binding exposes `getMetadata()`, `listFields()`, `listItems()`, `getItem(id)`,
+and `listItemFields(id)`. Field definitions include select options and current/completed iterations.
+Item listings include active and archived items, draft titles/bodies, and issue/PR summaries.
+Use `listItems({ isArchived: false })` for active items or `kind` to select a content kind.
+GitHub-redacted content is returned as `{ kind: "redacted" }`. Full issue/PR details and edits
+require a separate issue, PR, or repository connection.
+
+```ts
+const metadata = await env.GITHUB_PROJECT.getMetadata();
+using items = await env.GITHUB_PROJECT.listItems();
+for (let page = await items.next(); page !== null; page = await items.next()) {
+  for (const item of page) {
+    using fields = await env.GITHUB_PROJECT.listItemFields(item.id);
+    for (let values = await fields.next(); values !== null; values = await fields.next()) {
+      // Read each field's name and decoded value.
+    }
+  }
+}
+```
+
+Project identity is pinned by node ID. Item membership is rechecked on every read/page, and
+project responses are read fresh. Sharing requires project access; observations of linked issue/PR
+content also require access to the corresponding repository, verified with each collaborator's
+own GitHub account. All returned pages are authorized before cursor advancement.
+
+Existing OAuth connections must reconnect to add `read:project`. A GitHub App needs Projects
+read permission configured in the App itself, plus access to any private repositories it reads.
+
+The optional, read-only GraphQL contract check uses `CONTRACT_GITHUB_PROJECT_TOKEN` and
+`CONTRACT_GITHUB_PROJECT_URL`, separately from the hooks' repository fixtures. Run it with
+`pnpm --dir packages/gatekeeper-github exec vitest run -c vitest.contract.config.ts __tests__/contract/projects.contract.test.ts`.
+The token must be able to read the selected project, which must contain at least one item so item
+and field-value queries are exercised. No projects or issues are created or edited. The scheduled
+and manually dispatched `GitHub contract` workflow runs this check in its own job, independently
+of the webhook fixtures. Configure the repository secret `CONTRACT_GITHUB_PROJECT_TOKEN` and
+variable `CONTRACT_GITHUB_PROJECT_URL`; configuring only one fails with an actionable error,
+while leaving both unset explicitly skips the check. The token is passed only to configuration
+validation and the test step, never dependency installation.
+
 ## Auto-approval
 
 Every queued action carries a stable kind (`github.<action>`, e.g. `github.push`), and the user may
@@ -25,7 +196,8 @@ opt in to approving a kind automatically on a connection. Every action is eligib
 closing and reopening, `requestChanges` reviews and force pushes, except those that pass a review
 gate or can start a billed run, which always wait for a person: **merging a pull request**, **an
 approving review**, **a push or force push to the repository's default branch or a protected
-branch**, and **creating an issue assigned to an app**. An approval shares
+branch**, and **creating an issue assigned to an app**, and **editing an issue's project field**. Project-field
+edits cross the repository/project permission boundary and always require explicit approval. An approval shares
 the `github.postReview` kind with comment and request-changes reviews, and a gated push shares
 `github.push` or `github.forcePush` with pushes to other branches, but neither is ever
 auto-approvable, so enabling those kinds does not cover them. Whether a branch is gated is read
