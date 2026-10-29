@@ -6,7 +6,7 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/github");
-		durableNamespaces: "UserAccount" | "GitHubGatekeeperImpl" | "GitHubHookDriver";
+		durableNamespaces: "UserAccount" | "GitHubGatekeeperImpl" | "GitHubHookDriver" | "GitHubProjectGatekeeper";
 	}
 	interface Env extends __BaseEnv_Env {}
 }
