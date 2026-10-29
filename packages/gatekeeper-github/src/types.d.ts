@@ -11,6 +11,15 @@ import type { RpcStub } from "cloudflare:workers";
  * repository's file *content* is not readable through this interface directly.
  */
 export interface GitHubRepo {
+  /** List this repository's milestones, including closed ones by default. */
+  listMilestones(options?: GitHubMilestoneFilter): Promise<Cursor<GitHubMilestone>>;
+
+  /** Read a milestone by its repository-local number. */
+  getMilestone(number: number): Promise<GitHubMilestone>;
+
+  /** List users eligible for assignment in this repository. Dispose the cursor after reading it to null. */
+  listAssignees(options?: GitHubPageOptions): Promise<Cursor<GitHubActor>>;
+
   /** Returns basic metadata about the repository. */
   getMetadata(): Promise<GitHubRepoMetadata>;
 
@@ -238,8 +247,45 @@ export interface GitHubRepo {
 
 /** A single GitHub issue. */
 export interface GitHubIssue {
+  /**
+   * List this issue's Projects (v2) memberships, including archived items.
+   * Only projects visible to the connected GitHub account are returned. Requires
+   * project read permission; reconnect GitHub if the connection predates this permission.
+   * Also available on pull requests. An issue not yet created on GitHub has no memberships.
+   */
+  listProjects(options?: GitHubPageOptions): Promise<Cursor<GitHubProjectItem>>;
+
+  /**
+   * Read the populated project fields for an item returned by `listProjects()`.
+   * The item must still belong to this issue or pull request. Unset fields are omitted.
+   * Project read permission is required. Dispose the returned cursor when finished.
+   */
+  listProjectFields(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubProjectFieldValue>>;
+
+  /** List definitions, including options and iterations, for this issue's project item.
+   * Includes unset fields. The item must belong to this issue/PR on every page.
+   */
+  listProjectFieldDefinitions(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubIssueProjectField>>;
+
+  /** Queue an approval-gated change to a project field; null clears its value.
+   * Supports text, number, date, single-select (Status/Priority), multi-select and iteration.
+   * Use listProjectFieldDefinitions() for IDs/options. Requires project write permission
+   * (OAuth project scope; reconnect older connections). Only existing issue/PR memberships
+   * may be edited. Derived fields use setTitle/setMilestone/setAssignees/addLabels/removeLabels.
+   * Organization issue fields and calculated/read-only fields are not editable here.
+   */
+  setProjectField(itemId: string, fieldId: string, value: GitHubProjectFieldInput | null): Promise<void>;
+
   /** Returns the current issue metadata and body. */
   getDetails(): Promise<GitHubIssueDetails>;
+
+  /** Assign a repository-local milestone number, or null to remove the current milestone. Also available on PRs. Requires repository write access. */
+  setMilestone(number: number | null): Promise<void>;
+
+  /** Replace all assignees with these GitHub logins; [] removes everyone. Also available on PRs.
+   * Use the repository's listAssignees() to discover eligible users. Requires repository write access.
+   */
+  setAssignees(logins: string[]): Promise<void>;
 
   /** Replaces the issue title. */
   setTitle(title: string): Promise<void>;
@@ -682,6 +728,8 @@ export type GitHubIssueId = {
 
 /** A compact issue summary returned from list and search operations. */
 export type GitHubIssueSummary = GitHubIssueId & {
+  /** Assigned milestone; null when none. Older cached results may omit this field. */
+  milestone?: GitHubMilestone | null;
   title: string;
   state: GitHubIssueState;
   labels: GitHubLabel[];
@@ -692,6 +740,82 @@ export type GitHubIssueSummary = GitHubIssueId & {
   closedAt?: Date;
   commentCount: number;
 }
+
+/** A repository milestone, including its progress and due date. */
+export type GitHubMilestone = {
+  number: number;
+  title: string;
+  description: string;
+  url: string;
+  state: "open" | "closed";
+  openIssues: number;
+  closedIssues: number;
+  createdAt: Date;
+  updatedAt: Date;
+  dueOn: Date | null;
+  closedAt: Date | null;
+};
+
+/** Filters for repository milestone listings. */
+export type GitHubMilestoneFilter = GitHubPageOptions & {
+  state?: "open" | "closed" | "all";
+  sort?: "due_on" | "completeness";
+  direction?: "asc" | "desc";
+};
+
+/** One issue or pull request's membership in a GitHub Project (v2). */
+export type GitHubProjectItem = {
+  /** Project item node ID; pass this to `listProjectFields()`. */
+  id: string;
+  isArchived: boolean;
+  project: {
+    id: string;
+    number: number;
+    title: string;
+    url: string;
+    shortDescription: string | null;
+    closed: boolean;
+    public: boolean;
+  };
+};
+
+/** An editable project value. Exactly one typed value is supplied; null clears a field. */
+export type GitHubProjectFieldInput =
+  | { kind: "text"; text: string }
+  | { kind: "number"; number: number }
+  | { kind: "date"; date: string }
+  | { kind: "singleSelect"; optionId: string }
+  | { kind: "multiSelect"; optionIds: string[] }
+  | { kind: "iteration"; iterationId: string };
+
+/** A field definition scoped to a project containing the connected issue/PR. */
+export type GitHubIssueProjectField = {
+  id: string;
+  name: string;
+  dataType: string;
+  isIssueField?: boolean;
+  options?: { id: string; name: string }[];
+  configuration?: {
+    iterations: { id: string; title: string; startDate: string; duration: number }[];
+    completedIterations: { id: string; title: string; startDate: string; duration: number }[];
+  };
+};
+
+/** A populated project field. Date-only values use YYYY-MM-DD strings. */
+export type GitHubProjectFieldValue = {
+  field: { id: string; name: string; dataType: string } | null;
+  value:
+    | { kind: "text"; text: string | null }
+    | { kind: "number"; number: number | null }
+    | { kind: "date"; date: string | null }
+    | { kind: "singleSelect"; optionId: string | null; name: string | null }
+    | { kind: "multiSelect"; options: { id: string; name: string }[] }
+    | { kind: "iteration"; iterationId: string; title: string; startDate: string; duration: number }
+    /** Built-in fields derived from the issue/PR; read them with `getDetails()`. */
+    | { kind: "issueProperty"; property: "labels" | "assignees" | "milestone" | "repo" }
+    /** A GitHub field type whose value this API does not yet decode. */
+    | { kind: "unsupported"; type: string };
+};
 
 /** Full issue details returned by `GitHubIssue.getDetails()`. */
 export type GitHubIssueDetails = GitHubIssueSummary & {
@@ -816,6 +940,8 @@ export type GitHubPageOptions = {
 
 /** Filters for listing issues. */
 export type GitHubIssueFilter = GitHubPageOptions & {
+  /** Milestone number, "none" for unassigned issues, or "*" for any assigned milestone. */
+  milestone?: number | "none" | "*";
   state?: GitHubIssueState | "all";
   labels?: string[];
   author?: string;
