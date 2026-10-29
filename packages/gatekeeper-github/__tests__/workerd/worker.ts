@@ -25,6 +25,9 @@ import type {
   GitHubEvent,
   GitHubIssue,
   GitHubIssueDetails,
+  GitHubMilestone,
+  GitHubProjectFieldValue,
+  GitHubProjectItem,
   GitHubPullRequestDetails,
   GitHubPullRequestDiffFile,
   GitHubPullRequestMergeOptions,
@@ -217,6 +220,15 @@ async function drain<T>(cursor: { next(): Promise<T[] | null> }): Promise<T[]> {
  */
 export type Outcome<T> = { ok: T } | { error: string };
 
+/** Concrete serializable rows: `unknown` would erase the success branch from the RPC stub. */
+type PlanningRow = GitHubMilestone | GitHubProjectItem | GitHubProjectFieldValue;
+
+/** Pages and authorizations returned by the planning test harness across Workers RPC. */
+type PlanningReadResult = {
+  pages: (PlanningRow[] | null | { error: string })[];
+  observations: ObservationDescription[];
+};
+
 async function outcome<T>(fn: () => Promise<T>): Promise<Outcome<T>> {
   try {
     return { ok: await fn() };
@@ -262,7 +274,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   async planningPages(facetName: string, props: GatekeeperProps,
     method: "milestones" | "projects" | "fields", options: {
       id?: string; itemId?: string; kind?: "issue" | "pull"; pageSize?: number; calls?: number; deny?: number;
-    } = {}) {
+    } = {}): Promise<Outcome<PlanningReadResult>> {
     return outcome(async () => {
       const queue = new PlanningQueue(options.deny ?? 0);
       using queueStub = new RpcStub(queue);
@@ -274,8 +286,8 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       const target = issue ?? session;
       using cursor = await (method === "milestones" ? session.listMilestones({ resultsPerPage: options.pageSize ?? 1 }) :
         method === "projects" ? target.listProjects({ resultsPerPage: options.pageSize ?? 1 }) :
-        target.listProjectFields(options.itemId ?? "item", { resultsPerPage: options.pageSize ?? 1 })) as Cursor<unknown> & Disposable;
-      const pages: unknown[] = [];
+        target.listProjectFields(options.itemId ?? "item", { resultsPerPage: options.pageSize ?? 1 })) as Cursor<PlanningRow> & Disposable;
+      const pages: PlanningReadResult["pages"] = [];
       for (let n = 0; n < (options.calls ?? 5); n++) {
         try {
           const page = await cursor.next();
