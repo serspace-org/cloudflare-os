@@ -21,7 +21,7 @@ passing substitutes for checks that actually ran.
 From a checkout of this fork, using Node 24.19 or newer and Git:
 
 ```sh
-node scripts/sync-upstream.ts
+pnpm sync:upstream
 ```
 
 This fetches `origin` branch `serspace` and `upstream` branch `main`, prints their
@@ -40,7 +40,7 @@ existing remote-tracking commits without network access; those refs may be stale
 To retain a successful merge for review and verification:
 
 ```sh
-node scripts/sync-upstream.ts --prepare
+pnpm sync:upstream --prepare
 ```
 
 The script prints the new `sync/cloudflare-<fork SHA>-<upstream SHA>` branch,
@@ -49,6 +49,12 @@ Hooks are disabled for worktree creation, branch switching, merging, and
 committing; commit signing is disabled for the prepared commit, which uses your
 configured Git identity. No upstream application code
 is run during the rehearsal. Review before installing or testing upstream code.
+
+Options pass directly through the pnpm command, for example
+`pnpm sync:upstream --no-fetch` or `pnpm sync:upstream --repo PATH`.
+The underlying `node scripts/sync-upstream.ts` entry point remains available
+without installing dependencies. In a deployment checkout, after its submodule
+pin includes this script, use `pnpm --dir cloudflare-os sync:upstream`.
 
 Exit codes: **0** = up to date or conflict-free; **1** = merge conflicts (file
 names printed); **2** = configuration/Git/usage error. Normal completion removes
