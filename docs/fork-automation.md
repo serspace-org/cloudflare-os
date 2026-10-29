@@ -16,6 +16,66 @@ passing substitutes for checks that actually ran.
 
 ## Upstream sync checklist
 
+### Local merge rehearsal
+
+From a checkout of this fork, using Node 24.19 or newer and Git:
+
+```sh
+pnpm sync:upstream
+```
+
+This fetches `origin` branch `serspace` and `upstream` branch `main`, prints their
+exact commits, and checks the merge in a disposable detached worktree under
+`.worktrees/`. It preserves your current branch, staged/unstaged changes, and
+untracked files. It never pushes, opens a PR, changes the deployment submodule
+pin, or moves local `serspace`. Fetching updates remote-tracking refs and Git
+objects; this is not a fully read-only operation.
+
+Verify `origin` points to `serspace-org/cloudflare-os` and `upstream` points to
+`cloudflare/cloudflare-os` before running. The script uses those configured
+remotes, not hardcoded GitHub URLs. Use `--repo PATH` to target another checkout,
+including the deployment's `cloudflare-os` submodule. `--no-fetch` rehearses
+existing remote-tracking commits without network access; those refs may be stale.
+
+To retain a successful merge for review and verification:
+
+```sh
+pnpm sync:upstream --prepare
+```
+
+The script prints the new `sync/cloudflare-<fork SHA>-<upstream SHA>` branch,
+worktree path, and merge commit. It refuses to overwrite an existing candidate.
+Hooks are disabled for worktree creation, branch switching, merging, and
+committing; commit signing is disabled for the prepared commit, which uses your
+configured Git identity. No upstream application code
+is run during the rehearsal. Review before installing or testing upstream code.
+
+Options pass directly through the pnpm command, for example
+`pnpm sync:upstream --no-fetch` or `pnpm sync:upstream --repo PATH`.
+The underlying `node scripts/sync-upstream.ts` entry point remains available
+without installing dependencies. In a deployment checkout, after its submodule
+pin includes this script, use `pnpm --dir cloudflare-os sync:upstream`.
+
+Exit codes: **0** = up to date or conflict-free; **1** = merge conflicts (file
+names printed); **2** = configuration/Git/usage error. Normal completion removes
+the disposable worktree even on conflicts. A killed process can leave a
+`sync-check-*` directory; inspect it before removing that worktree with Git.
+
+**Conflict-free is not verified compatibility.** In the prepared worktree,
+install dependencies with `pnpm install`, review the merged diff, and run the
+checklist below before pushing or requesting review. Publishing and merging
+remain separate operator actions. Remove a retained candidate with
+`git worktree remove <printed-path>` when no longer needed; the branch remains
+until explicitly deleted. Do not force-remove a worktree with work to preserve.
+
+Regression tests (no network or GitHub credentials needed):
+
+```sh
+node --test scripts/sync-upstream.test.ts
+```
+
+### Verification before accepting a sync
+
 1. Start from the current remote `serspace` and merge upstream `main`, preserving ancestry.
 2. Preserve every upstream-only job's repository guard, including cleanup and bypass jobs.
 3. Classify new workflows in `scripts/fork-workflows.test.ts`. New deployment, review or paid
