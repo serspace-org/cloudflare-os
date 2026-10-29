@@ -30,6 +30,7 @@ export default defineConfig({
           CLIENT_ID: "test-client", CLIENT_SECRET: "test-secret", WEBHOOK_ORIGIN: "https://gadgets.test",
         },
         durableObjects: {
+          GITHUB_PROJECT: { className: "GitHubProjectGatekeeper", useSQLite: true },
           USER_ACCOUNT: { className: "UserAccount", useSQLite: true },
           GITHUB_GATEKEEPER: { className: "GitHubGatekeeperImpl", useSQLite: true },
           GITHUB_HOOK_DRIVER: { className: "GitHubHookDriver", useSQLite: true },

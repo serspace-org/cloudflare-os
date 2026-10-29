@@ -59,6 +59,19 @@ No per-user SQL tables are used.
   and this is set. `ciLog:*` stays, since each log is revalidated by job id beneath the pinned
   repository before use.
 
+### Project observations and observers
+
+- `projectObservation:<projectNodeId>` -> `"pending" | "observed"`. Written as pending before
+  observer verification starts, promoted only after observation authorization succeeds. Failed
+  reads remain pending and are rechecked on retry; both states constrain observer admission.
+- `projectObserver:<observerId>` -> persistent `Fetcher<GitHubVerifierApi>` for the observer's
+  own connected account. Stored after repository and tracked-project access checks; deleted by
+  `removeObserver`. Admission loops over newly discovered projects before storing the verifier,
+  closing races with reads that introduce projects while checks are in flight.
+
+Project memberships and field values are not cached. Repository access alone does not imply
+access to a private project containing one of its issues.
+
 ### Action log
 
 - `action:<approvalId>` -> `{ action, state: "staged" | "pending" }`, the queued `GitHubAction`.
@@ -73,6 +86,13 @@ Stored action variants:
 - `createPullRequest`
 - `setTitle`
 - `setBody`
+- `setMilestone`, `setAssignees` (assignment actions)
+- `setProjectField` (pins project ID, item ID, field definition/type, validated new value,
+  and simulated previous value; always requires explicit approval). Before the first mutation,
+  `revertInfo: { type: "projectFieldAssignment", before, after, reverted? }` stores the actual
+  apply-time value durably. Retries and undo compare fresh provider values against these targets,
+  verify membership/type/options again, and refuse to overwrite a different value. No new KV
+  key families are needed. Project field listings overlay pending values, including unset fields.
 - `addLabels`
 - `removeLabels`
 - `changeState`
