@@ -18,6 +18,13 @@ import type {
 } from '@gadgets/workshop-shared/api'
 import type { RpcStub } from 'capnweb'
 import DeleteConfirmationDialog from '../../components/DeleteConfirmationDialog'
+import {
+  PANEL_BOX,
+  PANEL_CARD,
+  PANEL_GROUP_HEADING,
+  PANEL_LEDE,
+  PANEL_TITLE,
+} from '../../components/panelStyles'
 import { AddGatewayModelForm } from './AddGatewayModelForm'
 import { GatewayModelRow, MODES } from './GatewayModelRow'
 import { GatewayProviders } from './GatewayProviders'
@@ -26,8 +33,6 @@ import { PROVIDER_LABELS, REASONING_LEVEL_LABELS } from './modelForm'
 import { fetchModelsDev, suggestModels } from './modelsDev'
 import { useGatewayTests } from './useGatewayTests'
 
-const CARD = 'rounded-xl border border-kumo-line bg-kumo-elevated p-6'
-const GROUP_HEADING = 'mb-2 text-sm font-semibold text-kumo-default'
 const USER_MODELS_LABEL = 'Users may add their own models'
 const MODELS_DEV_LABEL = 'Suggest models from models.dev'
 const DEFAULT_REASONING_LABEL = 'Default reasoning level'
@@ -54,7 +59,7 @@ const SettingRow = ({ label, help, children }: {
   help: { id: string; text: ReactNode }
   children: ReactNode
 }) => (
-  <div className="mb-4 flex items-center gap-4 rounded-lg border border-kumo-line bg-kumo-base px-4 py-3">
+  <div className={`mb-4 flex items-center gap-4 ${PANEL_BOX}`}>
     <div className="min-w-0 flex-1 text-sm">
       <p className="font-medium text-kumo-default">{label}</p>
       <p id={help.id} className="mt-0.5 text-kumo-subtle">{help.text}</p>
@@ -161,8 +166,8 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
 
   if (!gatewayModels) {
     return (
-      <div className={CARD}>
-        <h2 className="mb-1 text-lg font-semibold text-kumo-strong">Models</h2>
+      <div className={PANEL_CARD}>
+        <h2 className={PANEL_TITLE}>Models</h2>
         <p className="text-sm text-kumo-subtle">
           Models are managed here only when the deployment provides them through AI Gateway
           (<code className="font-mono text-xs">CF_AI_GATEWAY</code>). Otherwise each user adds
@@ -283,9 +288,9 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
     : undefined
 
   return (
-    <div className={CARD}>
-      <h2 className="mb-1 text-lg font-semibold text-kumo-strong">Models</h2>
-      <p className="mb-4 text-sm text-kumo-subtle">
+    <div className={PANEL_CARD}>
+      <h2 className={PANEL_TITLE}>Models</h2>
+      <p className={PANEL_LEDE}>
         The models this deployment provides through AI Gateway: the catalog this version ships for
         the providers that are on, plus the models this deployment added. A model left on
         its default follows the catalog when the deployment is upgraded.
@@ -310,7 +315,7 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
       />
 
       <section className="mb-6">
-        <h3 className={GROUP_HEADING}>Providers</h3>
+        <h3 className={PANEL_GROUP_HEADING}>Providers</h3>
         {/* A test is not a write: it changes nothing, so it neither takes nor waits for the lock. */}
         <GatewayProviders
           providers={gatewayModels.providerSettings}
@@ -320,7 +325,7 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
         />
       </section>
 
-      <dl className="mb-3 grid gap-x-3 gap-y-1 rounded-lg border border-kumo-line bg-kumo-base px-4 py-3 text-sm sm:grid-cols-[auto_1fr]">
+      <dl className={`mb-3 grid gap-x-3 gap-y-1 text-sm sm:grid-cols-[auto_1fr] ${PANEL_BOX}`}>
         {GATEWAY_MODEL_MODES.map((mode) => (
           <div key={mode} className="contents">
             <dt className="font-medium text-kumo-default">{MODES[mode].label}</dt>
@@ -342,7 +347,7 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
 
         {[...catalogByProvider].map(([provider, models]) => (
           <section key={provider}>
-            <h3 className={GROUP_HEADING}>{PROVIDER_LABELS[provider]}</h3>
+            <h3 className={PANEL_GROUP_HEADING}>{PROVIDER_LABELS[provider]}</h3>
             <ul className="flex flex-col gap-2">
               {models.map((model) => (
                 <GatewayModelRow
@@ -361,7 +366,7 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
         ))}
 
         <section>
-          <h3 className={GROUP_HEADING}>Added by this deployment</h3>
+          <h3 className={PANEL_GROUP_HEADING}>Added by this deployment</h3>
           {added.length === 0 ? (
             <p className="text-sm text-kumo-subtle">No models added.</p>
           ) : (
@@ -393,7 +398,7 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
             </>
           )}
 
-          <h4 className="mb-2 mt-5 text-sm font-medium text-kumo-default">Add a model</h4>
+          <h4 className={`mt-5 ${PANEL_GROUP_HEADING}`}>Add a model</h4>
           {gatewayModels.providers.length === 0 ? (
             <p className="text-sm text-kumo-subtle">
               No model can be added, because no provider is on. Turn one on under Providers.

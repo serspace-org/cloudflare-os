@@ -3,6 +3,7 @@ import { Dialog, Button, Input, Select, Collapsible, useKumoToastManager } from 
 import { AiChatAuthorInfo, AiModelProvider, AiGatewayInfo, RedactedAiModelConfig, SUGGESTED_MODELS, modelKind } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { PANEL_BOX, PANEL_FOOTER, PANEL_LEDE, PANEL_TITLE } from './components/panelStyles'
 import { ExtraHeadersEditor } from './features/ai-models/ExtraHeadersEditor'
 import { StoredSecretInput } from './features/ai-models/StoredSecretInput'
 import {
@@ -306,6 +307,11 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const showCredentials = !gatewayMode
   const tokenRequired = selection !== null && isTokenRequired(selection.provider, headerRows)
   const title = { add: 'Add AI Model', edit: 'Edit AI Model', clone: 'Clone AI Model' }[mode.type]
+  const lede = {
+    add: 'Choose a model, or describe one of your own, to make it available in your workspaces.',
+    edit: 'Changes apply to new requests. The model ID is its identity to your chats, so it stays as it is.',
+    clone: 'Starts from the model you copied. The new model is saved under its own ID.',
+  }[mode.type]
 
   // Group options by provider for rendering with visual separators.
   const groupedOptions: { provider: string; items: typeof options }[] = []
@@ -321,9 +327,12 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   return (
     <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) onCancel() }}>
       <Dialog className="responsive-dialog overflow-y-auto p-6" size="lg">
-        <Dialog.Title className="text-lg font-semibold mb-4">
+        <Dialog.Title className={PANEL_TITLE}>
           {title}
         </Dialog.Title>
+        <Dialog.Description className={PANEL_LEDE}>
+          {lede}
+        </Dialog.Description>
 
         <div className="space-y-4">
           {/* Model / Provider selection */}
@@ -444,7 +453,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             >
               <Collapsible.DefaultTrigger>Advanced Settings</Collapsible.DefaultTrigger>
               <Collapsible.DefaultPanel>
-                <div className="space-y-4">
+                <div className={`space-y-4 ${PANEL_BOX}`}>
                   {/* Ollama shows its API URL above; Workers AI's endpoint is derived from the account ID. */}
                   {showCredentials && !isOllama && !isCloudflare && (
                     <Input
@@ -495,7 +504,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         </div>
 
         {/* Footer */}
-        <div className="mt-6 flex justify-end gap-2">
+        <div className={`mt-6 justify-end ${PANEL_FOOTER}`}>
           <Dialog.Close render={(props) => (
             <Button variant="secondary" {...props} disabled={loading}>
               Cancel

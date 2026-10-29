@@ -1,5 +1,6 @@
 import { Button, Input } from '@cloudflare/kumo'
 import { Plus, Trash } from '@phosphor-icons/react'
+import { PANEL_BOX, PANEL_FIELD_DETAIL, PANEL_GROUP_HEADING } from '../../components/panelStyles'
 import { canKeepStoredValue, newHeaderRow, type HeaderRow } from './extraHeaders'
 import { StoredSecretInput } from './StoredSecretInput'
 
@@ -19,9 +20,9 @@ export const ExtraHeadersEditor = ({ rows, errors, onRowsChange, storedValuesUsa
     }))
 
   return (
-    <fieldset className="grid gap-2">
-      <legend className="mb-2 text-base font-medium text-kumo-default">Extra Headers</legend>
-      <p className="text-sm leading-snug text-kumo-subtle">
+    <fieldset className={`grid gap-2 ${PANEL_BOX}`}>
+      <legend className={PANEL_GROUP_HEADING}>Extra Headers</legend>
+      <p className={PANEL_FIELD_DETAIL}>
         Sent with every request to the provider, replacing any default header of the same name
       </p>
       {rows.map(row => (

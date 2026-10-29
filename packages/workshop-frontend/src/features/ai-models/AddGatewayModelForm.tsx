@@ -9,6 +9,7 @@ import type {
   GatewayModelLevelTest,
   ReasoningLevel,
 } from '@gadgets/workshop-shared/api'
+import { PANEL_BOX, PANEL_FIELD_DETAIL, PANEL_FOOTER } from '../../components/panelStyles'
 import { GatewayLevelTestsStatus, GatewayTestButton } from './GatewayTest'
 import { PROVIDER_LABELS, REASONING_LEVEL_LABELS, parseTokenLimit } from './modelForm'
 import type { ModelSuggestion } from './modelsDev'
@@ -196,7 +197,11 @@ export const AddGatewayModelForm = ({
   }
 
   return (
-    <form noValidate onSubmit={submit} className="grid items-start gap-4 sm:grid-cols-2">
+    <form
+      noValidate
+      onSubmit={submit}
+      className={`grid items-start gap-4 sm:grid-cols-2 ${PANEL_BOX}`}
+    >
       <Select<AiModelProvider>
         label="Provider"
         className="w-full"
@@ -381,14 +386,14 @@ export const AddGatewayModelForm = ({
           <Select.Option key={level} value={level}>{REASONING_LEVEL_LABELS[level]}</Select.Option>
         ))}
       </Select>
-      <div className="flex min-w-0 flex-col items-start gap-2 sm:col-span-2">
+      <div className="flex min-w-0 flex-col items-stretch gap-2 sm:col-span-2">
         {fieldError.alert}
         {refusal && (
           <p role="alert" className="text-sm leading-snug text-kumo-danger">
             {refusal}
           </p>
         )}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className={PANEL_FOOTER}>
           <Button type="submit" variant="secondary" icon={Plus} disabled={disabled}>
             Add model
           </Button>
@@ -400,8 +405,8 @@ export const AddGatewayModelForm = ({
           />
         </div>
         {/* As wide as the form and no wider, so that a provider's long message wraps. */}
-        <div className="self-stretch">
-          <p className="text-xs leading-4 text-kumo-subtle">{TEST_HELP}</p>
+        <div>
+          <p className={PANEL_FIELD_DETAIL}>{TEST_HELP}</p>
           <GatewayLevelTestsStatus test={test} />
         </div>
       </div>

@@ -8,6 +8,7 @@ import type {
   GatewayModelSettings,
   ReasoningLevel,
 } from '@gadgets/workshop-shared/api'
+import { PANEL_FOOTER, PANEL_ROW } from '../../components/panelStyles'
 import { GatewayTestButton, GatewayTestStatus } from './GatewayTest'
 import {
   PROVIDER_LABELS,
@@ -158,7 +159,7 @@ export const GatewayModelRow = ({
   }
 
   return (
-    <li className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2.5">
+    <li className={`flex flex-wrap items-center gap-x-6 gap-y-2 ${PANEL_ROW}`}>
       <div className="min-w-0 flex-1 basis-56">
         <p className="flex flex-wrap items-center gap-2">
           <span className="min-w-0 break-words text-sm font-medium text-kumo-default">{model.name}</span>
@@ -303,7 +304,8 @@ export const GatewayModelRow = ({
                     )}
                   </div>
                   {budgetAlert.alert}
-                  <div className="flex gap-2">
+                  {/* Under a rule, like the buttons of every other form in the model panels. */}
+                  <div className={PANEL_FOOTER}>
                     <Button
                       type="submit"
                       variant="secondary"
