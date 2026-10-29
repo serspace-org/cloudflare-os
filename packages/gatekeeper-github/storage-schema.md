@@ -42,6 +42,19 @@ No per-user SQL tables are used.
   before the id is known. With it, redirects are followed only to the same path under
   `/repositories/<repoId>`; every other redirect fails the request. Absent until first use.
 
+### Project observations and observers
+
+- `projectObservation:<projectNodeId>` -> `"pending" | "observed"`. Written as pending before
+  observer verification starts, promoted only after observation authorization succeeds. Failed
+  reads remain pending and are rechecked on retry; both states constrain observer admission.
+- `projectObserver:<observerId>` -> persistent `Fetcher<GitHubVerifierApi>` for the observer's
+  own connected account. Stored after repository and tracked-project access checks; deleted by
+  `removeObserver`. Admission loops over newly discovered projects before storing the verifier,
+  closing races with reads that introduce projects while checks are in flight.
+
+Project memberships and field values are not cached. Repository access alone does not imply
+access to a private project containing one of its issues.
+
 ### Action log
 
 - `action:<approvalId>` -> `{ action, state: "staged" | "pending" }`, the queued `GitHubAction`.

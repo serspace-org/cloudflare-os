@@ -4,6 +4,11 @@ import {
   isInvalidGrant, mergeOAuthTokens, OAuthClient, oauthRefresh,
 } from "@gadgets/gatekeeper-kit/oauth-client";
 import type { UserAccount } from "./github";
+import {
+  ISSUE_PROJECTS_QUERY, PROJECT_FIELDS_QUERY, connectionPage, normalizeMilestone, normalizeProjectField,
+  type IssueProjectsResponse, type MilestoneResponse, type PlanningPage, type ProjectFieldsResponse,
+} from "./github-planning";
+import type { GitHubMilestone, GitHubMilestoneFilter, GitHubProjectItem, GitHubProjectFieldValue } from "./types";
 
 /**
  * A GitHub OAuth grant. An expiring grant -- the default for OAuth apps registered since August
@@ -33,6 +38,7 @@ export type GitHubLabelResponse = {
 };
 
 export type GitHubRepoResponse = {
+  node_id?: string;
   id: number;
   name: string;
   full_name: string;
@@ -47,6 +53,7 @@ export type GitHubRepoResponse = {
 };
 
 export type GitHubIssueResponse = {
+  milestone?: MilestoneResponse | null;
   number: number;
   html_url: string;
   title: string;
@@ -73,6 +80,7 @@ export type GitHubPullRequestBranchResponse = {
 };
 
 export type GitHubPullRequestResponse = {
+  milestone?: MilestoneResponse | null;
   number: number;
   html_url: string;
   title: string;
@@ -564,6 +572,79 @@ export class GitHubApi {
     options: RequestOptions = {},
   ): Promise<RequestResult<T>> {
     return await request<T>(method, path, options, this.#getToken, this.#repo);
+  }
+
+  /** GraphQL can return HTTP 200 with partial data and errors: never serve that as complete. */
+  async #graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const { data: result } = await this.#request<{ data?: T; errors?: { type?: string }[] }>(
+      "POST", "/graphql", { body: { query, variables } });
+    if (result.errors?.length || !result.data) {
+      const denied = result.errors?.length && result.errors.every(error =>
+        ["FORBIDDEN", "NOT_FOUND", "INSUFFICIENT_SCOPES"].includes(error.type ?? ""));
+      throw new GitHubApiError(denied ? 403 : 502, denied
+        ? "GitHub project access was denied. Reconnect GitHub with project read permission and check project access."
+        : "GitHub could not return complete project data. Please retry.");
+    }
+    return result.data;
+  }
+
+  async listMilestones(owner: string, repo: string, options: GitHubMilestoneFilter,
+    page: number, perPage: number): Promise<GitHubMilestone[]> {
+    const { data } = await this.#request<MilestoneResponse[]>("GET",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/milestones`, {
+        query: { state: options.state ?? "all", sort: options.sort, direction: options.direction,
+          page, per_page: perPage },
+      });
+    return data.map(normalizeMilestone);
+  }
+
+  async getMilestone(owner: string, repo: string, number: number): Promise<GitHubMilestone> {
+    const { data } = await this.#request<MilestoneResponse>("GET",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/milestones/${number}`);
+    return normalizeMilestone(data);
+  }
+
+  async listIssueProjects(number: number, kind: "issue" | "pull", first: number, after?: string)
+    : Promise<PlanningPage<GitHubProjectItem>> {
+    if (!this.#repo) throw new Error("Cannot read projects without a verified repository identity.");
+    // Resolve the GraphQL node through the pinned numeric identity, including after a rename.
+    const { data: repository } = await this.#request<GitHubRepoResponse>("GET", `/repositories/${this.#repo.id}`);
+    if (!repository.node_id || repository.id !== this.#repo.id) {
+      throw new Error("GitHub did not return the connected repository identity.");
+    }
+    const result = await this.#graphql<IssueProjectsResponse>(ISSUE_PROJECTS_QUERY,
+      { repo: repository.node_id, number, first, after });
+    const issue = result.node?.issueOrPullRequest;
+    if (!issue || issue.__typename !== (kind === "issue" ? "Issue" : "PullRequest")) {
+      throw new Error("The connected GitHub issue or pull request is no longer available.");
+    }
+    return connectionPage(issue.projectItems, after);
+  }
+
+  async listIssueProjectFields(number: number, kind: "issue" | "pull", item: string,
+    first: number, after?: string): Promise<PlanningPage<GitHubProjectFieldValue> & { projectId: string }> {
+    if (!this.#repo) throw new Error("Cannot read projects without a verified repository identity.");
+    const { node } = await this.#graphql<ProjectFieldsResponse>(PROJECT_FIELDS_QUERY, { item, first, after });
+    const content = node?.content;
+    if (!node || !content || content.__typename !== (kind === "issue" ? "Issue" : "PullRequest") ||
+        content.number !== number || content.repository?.databaseId !== this.#repo.id) {
+      throw new Error("This project item does not belong to the connected issue or pull request.");
+    }
+    const page = connectionPage(node.fieldValues, after);
+    return { items: page.items.map(normalizeProjectField), next: page.next, projectId: node.project.id };
+  }
+
+  /** Probe one project's ACL using this API's account, without disclosing its metadata. */
+  async hasProjectAccess(id: string): Promise<boolean> {
+    try {
+      const { node } = await this.#graphql<{ node: { id?: string } | null }>(
+        "query ProjectAccess($id: ID!) { node(id: $id) { ... on ProjectV2 { id } } }", { id });
+      return node?.id === id;
+    } catch (error) {
+      if (error instanceof GitHubApiError && !error.rateLimited &&
+          (error.status === 403 || error.status === 404)) return false;
+      throw error;
+    }
   }
 
   async #conditionalGet<T>(

@@ -61,6 +61,8 @@ import {
 } from "./github-hooks";
 import type { GitHubWebhookEvent } from "./github-webhook-events";
 import { assertIssueSearchResultsInRepo, buildIssueSearchQuery } from "./github-search";
+import { normalizeMilestone } from "./github-planning";
+import { PlanningCursor } from "./github-planning-cursor";
 import {
   MAX_DIFF_BLOB_BYTES,
   changedPathsBetweenTrees,
@@ -117,6 +119,10 @@ import type {
   GitHubIssueState,
   GitHubIssueSummary,
   GitHubLabel,
+  GitHubMilestone,
+  GitHubMilestoneFilter,
+  GitHubProjectItem,
+  GitHubProjectFieldValue,
   GitHubPageOptions,
   GitHubPullRequest,
   GitHubPullRequestBranchRef,
@@ -586,7 +592,7 @@ const MAX_PENDING_CHAIN_COMMITS = 250;
 const GITHUB_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GITHUB_LOGO_SVG)}`;
 
 // `user:email` lets us read the account's primary verified email for sign-in (getAuthenticatedEmail).
-const OAUTH_SCOPES = ["repo", "read:user", "user:email"];
+const OAUTH_SCOPES = ["repo", "read:user", "user:email", "read:project"];
 
 // Minimal scopes for sign-in only (verify the user's email). Used when connecting in "auth" mode;
 // the resulting grant is transient.
@@ -813,6 +819,7 @@ function normalizeIssueSummary(owner: string, repo: string, response: GitHubIssu
     updatedAt: new Date(response.updated_at),
     closedAt: parseDate(response.closed_at),
     commentCount: response.comments,
+    milestone: response.milestone ? normalizeMilestone(response.milestone) : null,
   };
 }
 
@@ -1770,11 +1777,16 @@ type GitHubVerifierProps = {
  */
 export interface GitHubVerifierApi extends GatekeeperUserVerifier {
   hasRepoAccess(owner: string, repo: string): Promise<boolean>;
+  hasProjectAccess(id: string): Promise<boolean>;
 }
 
 @validateRpc()
 export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
     implements GitHubVerifierApi {
+  async hasProjectAccess(id: string): Promise<boolean> {
+    return accountReader(this.ctx.exports, this.ctx.props.userObjectId)(api => api.hasProjectAccess(id));
+  }
+
   async hasRepoAccess(owner: string, repo: string): Promise<boolean> {
     try {
       await accountReader(this.ctx.exports, this.ctx.props.userObjectId)(api => api.getRepo(owner, repo));
@@ -2897,6 +2909,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       createdAt: new Date(action.submittedAt),
       updatedAt: new Date(action.submittedAt),
       commentCount: 0,
+      milestone: null,
       bodyMarkdown: action.options.bodyMarkdown ?? "",
     };
   }
@@ -2959,6 +2972,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       createdAt: new Date(action.submittedAt),
       updatedAt: new Date(action.submittedAt),
       commentCount: 0,
+      milestone: null,
       bodyMarkdown: action.options.bodyMarkdown ?? "",
       draft: action.options.draft ?? false,
       merged: false,
@@ -4456,6 +4470,64 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     }
   }
 
+  async getMilestone(number: number): Promise<GitHubMilestone> {
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error("Milestone number must be a positive integer.");
+    return this.#readApi(api => api.getMilestone(this.ctx.props.owner, this.ctx.props.repo, number));
+  }
+
+  async listMilestones(options: GitHubMilestoneFilter, pageSize: number,
+    queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubMilestone>> {
+    const ownedQueue = queue.dup();
+    return new PlanningCursor(async after => {
+      const page = Number(after ?? "1");
+      const items = await this.#readApi(api =>
+        api.listMilestones(this.ctx.props.owner, this.ctx.props.repo, options, page, pageSize));
+      await ownedQueue.authorizeObservation({ title: "List GitHub milestones", description: "Read a page of milestones in the connected repository." });
+      return { items, next: items.length === pageSize ? String(page + 1) : undefined };
+    }, () => ownedQueue[Symbol.dispose]());
+  }
+
+  /** Resolve provisional IDs at each page read, so a newly applied create becomes visible. */
+  #planningNumber(kind: EntityKind, id: string): number | undefined {
+    if (id.startsWith("~")) {
+      const provisional = this.#getProvisionalResource(id);
+      if (!provisional || provisional.kind !== kind ||
+          (!provisional.realId && !this.#findCreateAction(id, kind))) {
+        throw new Error(`Provisional ${kind} ${id} is no longer available.`);
+      }
+      return provisional.realId ? Number(provisional.realId) : undefined;
+    }
+    const number = Number(id);
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error("Invalid GitHub issue or pull request number.");
+    return number;
+  }
+
+  async listIssueProjects(kind: EntityKind, id: string, pageSize: number,
+    queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubProjectItem>> {
+    const ownedQueue = queue.dup();
+    return new PlanningCursor(async after => {
+      const number = this.#planningNumber(kind, id);
+      const page = number === undefined ? { items: [] } : await this.#readApi(api =>
+        api.listIssueProjects(number, kind, pageSize, after));
+      await this.authorizeProjectObservation(ownedQueue, page.items.map(item => item.project.id),
+        { title: `Read GitHub projects for #${id}`, description: "Read a page of project memberships for the connected issue or pull request." });
+      return page;
+    }, () => ownedQueue[Symbol.dispose]());
+  }
+
+  async listIssueProjectFields(kind: EntityKind, id: string, itemId: string, pageSize: number,
+    queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubProjectFieldValue>> {
+    const ownedQueue = queue.dup();
+    return new PlanningCursor(async after => {
+      const number = this.#planningNumber(kind, id);
+      if (number === undefined) throw new Error("This issue or pull request has no project items yet.");
+      const page = await this.#readApi(api => api.listIssueProjectFields(number, kind, itemId, pageSize, after));
+      await this.authorizeProjectObservation(ownedQueue, [page.projectId],
+        { title: `Read GitHub project fields for #${id}`, description: "Read a page of populated fields for this issue or pull request in a project." });
+      return page;
+    }, () => ownedQueue[Symbol.dispose]());
+  }
+
   async repoMetadata(): Promise<GitHubRepoMetadata> {
     return this.#getRepoMetadata();
   }
@@ -5603,27 +5675,54 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   /**
-   * Observer tracking: GitHub uses the "ACL check (single unit)" strategy. Every binding — repo,
-   * issue, or pull request — is scoped to one repository, and issues/PRs inherit the repo's
-   * permissions, so the repository is the atomic ACL unit. To admit an observer we simply confirm
-   * they can read that repo, using their own token via the verifier (see GitHubVerifier).
-   *
-   * Because the whole unit is verified up front, there is never a later observation a verified
-   * observer shouldn't see, so we set no excludeObservers and need not remember observers;
-   * removeObserver is an idempotent no-op. The overseer re-runs addObserver on every open, so loss
-   * of the observer's repo access is caught promptly.
+   * Repository access covers issues and milestones. Projects have independent ACLs: retain
+   * both pending and observed project IDs so failed reads and concurrent admissions fail closed.
    */
-  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    const verifier = user as unknown as Fetcher<GitHubVerifierApi>;
+  async authorizeProjectObservation(queue: RpcStub<ApprovalQueue>, projectIds: string[],
+    description: ObservationDescription): Promise<void> {
+    const pending = [...new Set(projectIds)].filter(id =>
+      this.ctx.storage.kv.get<string>(`projectObservation:${id}`) !== "observed");
+    for (const id of pending) this.ctx.storage.kv.put(`projectObservation:${id}`, "pending");
+    const excluded: string[] = [];
+    for (const [key, verifier] of this.ctx.storage.kv.list<Fetcher<GitHubVerifierApi>>({ prefix: "projectObserver:" })) {
+      for (const id of pending) {
+        if (!(await verifier.hasProjectAccess(id))) {
+          excluded.push(key.slice("projectObserver:".length));
+          break;
+        }
+      }
+    }
+    await queue.authorizeObservation({ ...description, excludeObservers: excluded.length ? excluded : undefined });
+    for (const id of pending) this.ctx.storage.kv.put(`projectObservation:${id}`, "observed");
+  }
+
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as Fetcher<GitHubVerifierApi>;
     const { owner, repo } = this.ctx.props;
     if (!(await verifier.hasRepoAccess(owner, repo))) {
       throw new Error(
         `This collaborator does not have read access to the GitHub repository ${owner}/${repo}, ` +
         `so they cannot be allowed to observe data this workspace read from it.`);
     }
+    const checked = new Set<string>();
+    for (;;) {
+      const pending = [...this.ctx.storage.kv.list<string>({ prefix: "projectObservation:" })]
+        .map(([key]) => key.slice("projectObservation:".length)).filter(projectId => !checked.has(projectId));
+      if (!pending.length) break;
+      for (const projectId of pending) {
+        if (!(await verifier.hasProjectAccess(projectId))) {
+          throw new Error("This collaborator cannot read a GitHub project observed by this workspace.");
+        }
+        checked.add(projectId);
+      }
+    }
+    // No await between the last scan and admission: a new project's read will check this verifier.
+    this.ctx.storage.kv.put(`projectObserver:${id}`, verifier);
   }
 
-  async removeObserver(_id: string): Promise<void> {}
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(`projectObserver:${id}`);
+  }
 }
 
 /**
@@ -5656,6 +5755,16 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
   [Symbol.dispose](): void {
     this.#gitCache.dispose();
     (this.#approvalQueue as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
+  }
+
+  async listMilestones(options?: GitHubMilestoneFilter): Promise<Cursor<GitHubMilestone>> {
+    return this.#gatekeeper.listMilestones(options ?? {}, pageSizeOf(options), this.#approvalQueue);
+  }
+
+  async getMilestone(number: number): Promise<GitHubMilestone> {
+    const milestone = await this.#gatekeeper.getMilestone(number);
+    await this.#approvalQueue.authorizeObservation({ title: `Read GitHub milestone #${number}`, description: "Read a milestone in the connected repository." });
+    return milestone;
   }
 
   async getMetadata(): Promise<GitHubRepoMetadata> {
@@ -5851,6 +5960,14 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
 
   [Symbol.dispose](): void {
     (this.approvalQueue as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
+  }
+
+  async listProjects(options?: GitHubPageOptions): Promise<Cursor<GitHubProjectItem>> {
+    return this.gatekeeper.listIssueProjects(this.kind, this.logicalId, pageSizeOf(options), this.approvalQueue);
+  }
+
+  async listProjectFields(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubProjectFieldValue>> {
+    return this.gatekeeper.listIssueProjectFields(this.kind, this.logicalId, itemId, pageSizeOf(options), this.approvalQueue);
   }
 
   async getDetails(): Promise<GitHubIssueDetails> {
