@@ -11,6 +11,12 @@ import type { RpcStub } from "cloudflare:workers";
  * repository's file *content* is not readable through this interface directly.
  */
 export interface GitHubRepo {
+  /** List this repository's milestones, including closed ones by default. */
+  listMilestones(options?: GitHubMilestoneFilter): Promise<Cursor<GitHubMilestone>>;
+
+  /** Read a milestone by its repository-local number. */
+  getMilestone(number: number): Promise<GitHubMilestone>;
+
   /** Returns basic metadata about the repository. */
   getMetadata(): Promise<GitHubRepoMetadata>;
 
@@ -201,6 +207,21 @@ export interface GitHubRepo {
 
 /** A single GitHub issue. */
 export interface GitHubIssue {
+  /**
+   * List this issue's Projects (v2) memberships, including archived items.
+   * Only projects visible to the connected GitHub account are returned. Requires
+   * project read permission; reconnect GitHub if the connection predates this permission.
+   * Also available on pull requests. An issue not yet created on GitHub has no memberships.
+   */
+  listProjects(options?: GitHubPageOptions): Promise<Cursor<GitHubProjectItem>>;
+
+  /**
+   * Read the populated project fields for an item returned by `listProjects()`.
+   * The item must still belong to this issue or pull request. Unset fields are omitted.
+   * Project read permission is required. Dispose the returned cursor when finished.
+   */
+  listProjectFields(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubProjectFieldValue>>;
+
   /** Returns the current issue metadata and body. */
   getDetails(): Promise<GitHubIssueDetails>;
 
@@ -362,6 +383,8 @@ export type GitHubIssueId = {
 
 /** A compact issue summary returned from list and search operations. */
 export type GitHubIssueSummary = GitHubIssueId & {
+  /** Assigned milestone; null when none. Older cached results may omit this field. */
+  milestone?: GitHubMilestone | null;
   title: string;
   state: GitHubIssueState;
   labels: GitHubLabel[];
@@ -372,6 +395,60 @@ export type GitHubIssueSummary = GitHubIssueId & {
   closedAt?: Date;
   commentCount: number;
 }
+
+/** A repository milestone, including its progress and due date. */
+export type GitHubMilestone = {
+  number: number;
+  title: string;
+  description: string;
+  url: string;
+  state: "open" | "closed";
+  openIssues: number;
+  closedIssues: number;
+  createdAt: Date;
+  updatedAt: Date;
+  dueOn: Date | null;
+  closedAt: Date | null;
+};
+
+/** Filters for repository milestone listings. */
+export type GitHubMilestoneFilter = GitHubPageOptions & {
+  state?: "open" | "closed" | "all";
+  sort?: "due_on" | "completeness";
+  direction?: "asc" | "desc";
+};
+
+/** One issue or pull request's membership in a GitHub Project (v2). */
+export type GitHubProjectItem = {
+  /** Project item node ID; pass this to `listProjectFields()`. */
+  id: string;
+  isArchived: boolean;
+  project: {
+    id: string;
+    number: number;
+    title: string;
+    url: string;
+    shortDescription: string | null;
+    closed: boolean;
+    public: boolean;
+  };
+};
+
+/** A populated project field. Date-only values use YYYY-MM-DD strings. */
+export type GitHubProjectFieldValue = {
+  field: { id: string; name: string; dataType: string } | null;
+  value:
+    | { kind: "text"; text: string | null }
+    | { kind: "number"; number: number | null }
+    | { kind: "date"; date: string | null }
+    | { kind: "singleSelect"; optionId: string | null; name: string | null }
+    | { kind: "multiSelect"; options: { id: string; name: string }[] }
+    | { kind: "iteration"; iterationId: string; title: string; startDate: string; duration: number }
+    /** Built-in fields derived from the issue/PR; read them with `getDetails()`. */
+    | { kind: "issueProperty"; property: "labels" | "assignees" | "milestone" | "repo" }
+    /** A GitHub field type whose value this API does not yet decode. */
+    | { kind: "unsupported"; type: string };
+};
 
 /** Full issue details returned by `GitHubIssue.getDetails()`. */
 export type GitHubIssueDetails = GitHubIssueSummary & {

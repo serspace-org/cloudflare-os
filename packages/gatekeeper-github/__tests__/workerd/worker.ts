@@ -11,7 +11,7 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint, restore } from "cloudflare:workers";
 import type {
   AccountDescription, ActionDescription, ActionKind, ConnectHandoff, GatekeeperUser, GitCache, HookController,
-  HookDescription, GitPullHints, GitPullTransfer,
+  HookDescription, GitPullHints, GitPullTransfer, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { GitHubGatekeeperImpl, GitHubHookDriver as GitHubHookDriverImpl, type GitHubVerifierApi } from "../../src/github.js";
 import type { GitHubHookParams } from "../../src/github-hooks.js";
@@ -166,7 +166,7 @@ type SeedFacet = { seed(entries: Record<string, unknown>): Promise<void> };
 // The facet methods TestHooks forwards to, spelled structurally: workers-types' `Fetcher<T>`
 // return-type inference collapses several of these returns to `never` (its `Serializable`
 // heuristic gives up on them), while the runtime objects are exactly the production ones.
-type GatekeeperFacet = Pick<GitHubGatekeeperImpl, "gitPull"> & {
+type GatekeeperFacet = Pick<GitHubGatekeeperImpl, "gitPull" | "addObserver" | "removeObserver"> & {
   preparePush(branch: string, commitId: string, force: boolean, cache: RpcStub<GitCache>)
     : Promise<PushActionData | null>;
   prepareCreatePullRequest(options: GitHubCreatePullRequestOptions)
@@ -256,6 +256,45 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     const verifier = (this.ctx.exports as unknown as TestExports)
       .GitHubVerifier({ props: { userObjectId } });
     return await outcome(() => verifier.hasRepoAccess(owner, repo));
+  }
+
+  /** Drive project/milestone reads through the actual session and its observation queue. */
+  async planningPages(facetName: string, props: GatekeeperProps,
+    method: "milestones" | "projects" | "fields", options: {
+      id?: string; itemId?: string; kind?: "issue" | "pull"; pageSize?: number; calls?: number; deny?: number;
+    } = {}) {
+    return outcome(async () => {
+      const queue = new PlanningQueue(options.deny ?? 0);
+      using queueStub = new RpcStub(queue);
+      using session = await this.#hookFacet(facetName, props).startSession(queueStub as never) as
+        (GitHubRepo & GitHubIssue) & Disposable;
+      using issue = method === "milestones" || props.resourceKind !== "repo" ? undefined :
+        await (options.kind === "pull" ? session.getPullRequest(options.id ?? "42") : session.getIssue(options.id ?? "42")) as
+          GitHubIssue & Disposable;
+      const target = issue ?? session;
+      using cursor = await (method === "milestones" ? session.listMilestones({ resultsPerPage: options.pageSize ?? 1 }) :
+        method === "projects" ? target.listProjects({ resultsPerPage: options.pageSize ?? 1 }) :
+        target.listProjectFields(options.itemId ?? "item", { resultsPerPage: options.pageSize ?? 1 })) as Cursor<unknown> & Disposable;
+      const pages: unknown[] = [];
+      for (let n = 0; n < (options.calls ?? 5); n++) {
+        try {
+          const page = await cursor.next();
+          pages.push(page);
+          if (page === null) break;
+        } catch (error) {
+          pages.push({ error: String(error) });
+        }
+      }
+      return { pages, observations: queue.observations };
+    });
+  }
+
+  async planningObserver(facetName: string, props: GatekeeperProps, id: string, userObjectId?: string) {
+    return outcome(async () => {
+      if (userObjectId === undefined) return this.#gatekeeper(facetName, props).removeObserver(id);
+      const verifier = (this.ctx.exports as unknown as TestExports).GitHubVerifier({ props: { userObjectId } });
+      await this.#gatekeeper(facetName, props).addObserver(id, verifier);
+    });
   }
 
   /** The `urlPattern` of the resource `GatekeeperUser.getGatekeeperClassFor(url)` resolves. */
@@ -688,6 +727,15 @@ class BindingQueue extends RpcTarget {
   async bindHook(controller: unknown, _callback: unknown, description: HookDescription): Promise<void> {
     this.storage.kv.put("hookController", controller);
     this.storage.kv.put("hookDescription", description);
+  }
+}
+
+class PlanningQueue extends RpcTarget {
+  observations: ObservationDescription[] = [];
+  constructor(private denied: number) { super(); }
+  async authorizeObservation(description: ObservationDescription): Promise<void> {
+    this.observations.push(description);
+    if (this.denied-- > 0 || description.excludeObservers?.length) throw new Error("Observation denied");
   }
 }
 

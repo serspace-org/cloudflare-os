@@ -7,7 +7,7 @@ This package provides GitHub OAuth integration for Gadgets. It serves two purpos
   to read the account's **primary verified email**, which becomes the user's identity. The sign-in
   grant is transient (discarded right after the email is read).
 - **Connections:** when a user connects GitHub (or signs in and later connects it), the full scopes
-  (`repo read:user user:email`) are requested so gadgets can access repositories, issues, and pull
+  (`repo read:user user:email read:project`) are requested so gadgets can access repositories, issues, projects, and pull
   requests on the user's behalf.
 
 > **Use a GitHub _OAuth App_, not a GitHub _App_.** Only OAuth Apps honor the OAuth `scope`
@@ -17,6 +17,51 @@ This package provides GitHub OAuth integration for Gadgets. It serves two purpos
 > integration` for the email lookup unless you separately grant it the **Email addresses** account
 > permission — and even then login won't be minimal-scope. See [Using a GitHub App
 > instead](#using-a-github-app-instead) if you must.
+
+## Milestones and issue project data
+
+Issue and pull request summaries and `getDetails()` include `milestone`, with its number, title,
+description, state, progress counts, and due/closed dates. It is `null` when unassigned; an older
+cached result may omit it until refreshed. Repository connections also expose `listMilestones()`
+(open and closed by default) and `getMilestone(number)`.
+
+Issues and pull requests expose `listProjects()` for their Projects **v2** memberships, including
+archived items, and `listProjectFields(itemId)` for populated field values. Both are paginated
+cursors; continue until `next()` returns `null`, even after an empty page, and dispose them when
+finished. For example, with a repository connection named `GITHUB_REPO`:
+
+```ts
+using issue = await GITHUB_REPO.getIssue("42");
+const details = await issue.getDetails();
+using projects = await issue.listProjects();
+for (let page = await projects.next(); page !== null; page = await projects.next()) {
+  for (const item of page) {
+    using fields = await issue.listProjectFields(item.id);
+    for (let values = await fields.next(); values !== null; values = await fields.next()) {
+      // Inspect item.project, item.isArchived, and each field's name, dataType, and value.
+    }
+  }
+}
+```
+
+Decoded project values include text, numbers, dates, single-select (including Status), multi-select,
+and iteration values. Built-in labels, assignees, milestone, and repository fields point back to
+the corresponding issue/PR details. Other field types are explicitly tagged `unsupported`, rather
+than silently omitted. Unset values are absent. Project reads only expose the connected issue or
+PR's memberships and fields; they do not grant access to other project items or draft issues.
+This API is read-only: it does not change milestones, project membership, or field values.
+
+Existing OAuth connections must **reconnect** to grant `read:project` before reading projects.
+Ordinary issue, PR, and milestone reads do not require that scope. With a GitHub App, grant the
+corresponding Projects read permission instead; OAuth scopes do not configure App permissions.
+GitHub only returns projects the connected account can see. Permission failures and partial
+GraphQL errors fail the read instead of appearing as an empty project list. See GitHub's
+[Projects API guide](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects).
+
+Sharing verifies project access separately from repository access. Each newly read project is
+tracked durably, including reads still awaiting authorization; existing observers are checked
+before disclosure, and new observers must be able to read every tracked project. Project pages
+are read fresh rather than cached, and every page is authorized before the cursor advances.
 
 ## Auto-approval
 
