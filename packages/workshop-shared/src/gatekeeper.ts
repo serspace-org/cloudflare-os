@@ -989,6 +989,44 @@ export interface GitPullTransfer extends RpcTarget {
   status(): Promise<GitPullStatus>;
 }
 
+/** Immutable manual authorization issued by the trusted Workshop dispatcher.
+ * This data is evidence only when obtained from its dispatcher-minted verifier;
+ * a client-supplied object or a known principal is never approval. */
+export interface ManualOwnerActionDecision {
+  /** Protocol discriminator; unsupported versions fail closed. */
+  formatVersion: 1;
+  /** Stable identifier retained before dispatch and reused on exact retries. */
+  decisionId: string;
+  /** Explicitly excludes approval-rule decisions. */
+  mode: "manual";
+  /** Vendor-scoped principal of the authenticated deciding human, not a SQL owner ID. */
+  connectionPrincipal: string;
+  /** Vendor derived from the saved connection, never a browser argument. */
+  vendorId: string;
+  /** Workspace in which this exact action was reviewed. */
+  workspaceId: string;
+  /** Workspace-local connection/facet ID. */
+  gatekeeperId: number;
+  /** Workshop's durable action-log ID. */
+  workshopActionId: number;
+  /** Gatekeeper's retained provider-action ID. */
+  actionId: number;
+  /** SHA-256 of the exact frozen request described by the submitted action. */
+  payloadHash: string;
+  /** Original decision time in ISO 8601 form, unchanged on retries. */
+  decidedAt: string;
+}
+
+/** Transient capability minted only for a persisted, live manual decision.
+ * Gatekeepers must check its principal against their selected account authority
+ * and its action/hash against their original journal before new dispatch.
+ * Do not persist this stub; Workshop recreates it from durable primitives. */
+export interface ManualOwnerActionDecisionVerifier extends RpcTarget {
+  /** Return the bound decision while the same action/connection is still pending;
+   * reject after withdrawal/removal or if its binding changed. */
+  getDecision(): Promise<ManualOwnerActionDecision>;
+}
+
 /**
  * Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
  * specific Gadget.
@@ -1167,6 +1205,21 @@ export interface Gatekeeper<Session> extends DurableObject {
    * declaration).
    */
   applyAction(action: number, cache: RpcStub<GitCache>): Promise<void>;
+
+  /** Read-only ownership/request check for manualOwnerApproval actions. Workshop
+   * supplies the authenticated approver's vendor principal through this private
+   * callback, not through an agent session. Check live authority and exact action
+   * hash, and reject non-owners before Workshop binds a durable decision. This
+   * check MUST NOT apply an effect or treat a principal string as approval. */
+  verifyManualOwnerAction?(action: number, connectionPrincipal: string, payloadHash: string): Promise<void>;
+
+  /** Apply an opted-in action only after verifying the dispatcher capability's
+   * owner principal, original action/hash and live authority. No fallback to
+   * ordinary applyAction is permitted. Implementations MUST reject their own
+   * opted-in payloads through ordinary applyAction. Receipt-first exact recovery
+   * remains idempotent; rejection/dismissal is not proof of non-commit. */
+  applyActionWithManualOwnerApproval?(action: number, cache: RpcStub<GitCache>,
+      decision: RpcStub<ManualOwnerActionDecisionVerifier>): Promise<void>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
@@ -1573,6 +1626,16 @@ export type ActionKind = {
  * - Store the action in an audit log.
  */
 export type ActionDescription = {
+  /** Require the versioned owner/manual-decision protocol for this exact frozen
+   * payload. Always a manual gate, regardless of autoApprovable/actionKind/rules.
+   * Both optional Gatekeeper owner-approval methods must be implemented; old
+   * dispatchers and missing methods must never be treated as authorization. */
+  manualOwnerApproval?: {
+    /** Protocol discriminator; unsupported versions fail at submission. */
+    formatVersion: 1;
+    /** SHA-256 of the exact retained request to be manually approved. */
+    payloadHash: string;
+  };
   /** Brief one-line summary of the action, like an email subject line, to display in a list. */
   title: string;
 

@@ -125,7 +125,9 @@ export class ActionOutcomeUnknownError extends Error {}
 export const APPLY_OUTCOME_UNKNOWN_MESSAGE = "This action was interrupted after it was dispatched, "
   + "so it may or may not have taken effect. Check the provider before submitting it again.";
 
-type KitOwnedField = "awaitDecision" | "autoApprovable" | "actionKind";
+// Owner-approved actions require the separate canonical Gatekeeper methods; the
+// ordinary kit dispatcher cannot accept this requirement as presentation data.
+type KitOwnedField = "awaitDecision" | "autoApprovable" | "actionKind" | "manualOwnerApproval";
 type ProviderOwnedField =
   | "title" | "description" | "fields" | "descriptionIsComplete" | "pushedCommits"
   | "implementsRevert";

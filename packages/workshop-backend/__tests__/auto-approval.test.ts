@@ -352,3 +352,30 @@ describe("autoApprovalRule", () => {
     expect(autoApprovalRule(storage, GK + 1, eligibleDescription())).toBeUndefined();
   });
 });
+
+describe("manual owner approval is a hard auto-approval gate", () => {
+  it("denies eligibility even with an affirmative verdict and an enabled matching rule", () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    expect(autoApprovalRule(storage, GK, eligibleDescription({
+      manualOwnerApproval: { formatVersion: 1, payloadHash: "a".repeat(64) },
+    }))).toBeUndefined();
+  });
+
+  it("stops a drain at a protected publication without dispatching it or later actions", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    putAction(storage, 1);
+    putAction(storage, 2);
+    putAction(storage, 3);
+    let protectedAction = getAction(storage, 2);
+    protectedAction.description.manualOwnerApproval = { formatVersion: 1, payloadHash: "a".repeat(64) };
+    storage.actions.put(protectedAction);
+    let apply = makeImmediateApply(storage);
+    await new AutoApprovalDrainer(storage, apply.applyFn).drain(GK);
+    expect(apply.calls).toEqual([1]);
+    expect(getAction(storage, 2).state).toBe("pending");
+    expect(getAction(storage, 2).manualOwnerDecision).toBeUndefined();
+    expect(getAction(storage, 3).state).toBe("pending");
+  });
+});

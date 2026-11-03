@@ -5,6 +5,7 @@ import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeC
   MAX_CODE_CHANGE_SIZE, transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   requireTextFiles, type FileContent, type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { type AgentCatalog, Gatekeeper, GatekeeperUserVerifier, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
+import type { ManualOwnerActionDecision, ManualOwnerActionDecisionVerifier } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -267,6 +268,25 @@ function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: st
 function gatekeeperVendorId(record: GatekeeperRecord | undefined): string | undefined {
   let spec = record?.creationSpec;
   return spec && "vendorId" in spec ? spec.vendorId.toLowerCase() : undefined;
+}
+
+function manualOwnerPayloadHash(description: ActionDescription): string | undefined {
+  let requirement = description.manualOwnerApproval;
+  if (requirement === undefined) return undefined;
+  if (!requirement || requirement.formatVersion !== 1 || Object.keys(requirement).length !== 2 ||
+      typeof requirement.payloadHash !== "string" || !/^[0-9a-f]{64}$/.test(requirement.payloadHash)) {
+    throw new Error("Invalid manual owner-approval requirement.");
+  }
+  return requirement.payloadHash;
+}
+
+type OwnerApprovedGatekeeper = Fetcher<Gatekeeper<unknown> & Required<Pick<Gatekeeper<unknown>,
+    "verifyManualOwnerAction" | "applyActionWithManualOwnerApproval">>>;
+
+@validateRpc()
+class ManualOwnerDecisionVerifier extends NativeRpcTarget implements ManualOwnerActionDecisionVerifier {
+  constructor(private readonly read: () => ManualOwnerActionDecision) { super(); }
+  async getDecision(): Promise<ManualOwnerActionDecision> { return this.read(); }
 }
 
 // Produce a valid, unused binding name from a suggested base name: sanitized to identifier
@@ -4942,7 +4962,34 @@ class OverseerImpl implements AgentHooks {
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean,
                            creation?: {creator: Fetcher<GatekeeperUserVerifier>,
-                                       configuration: string | null}): Promise<void> {
+                                       configuration: string | null},
+                           manualOwner?: {userId: string; connectionPrincipal: string}): Promise<void> {
+    if (manualOwnerPayloadHash(record.description) === undefined) {
+      return this.#applyPendingAction(record, resolvedBy, autoApproved, creation);
+    }
+    if (autoApproved || !manualOwner || record.action === "create") {
+      throw new Error("This action requires authenticated manual owner approval.");
+    }
+    let running = this.#manualOwnerApplies.get(record.id);
+    if (running) {
+      if (running.userId !== manualOwner.userId || running.principal !== manualOwner.connectionPrincipal) {
+        throw new Error("Another owner decision is already in progress.");
+      }
+      return running.promise;
+    }
+    let promise = this.#applyPendingAction(record, resolvedBy, false, creation, manualOwner)
+        .finally(() => this.#manualOwnerApplies.delete(record.id));
+    this.#manualOwnerApplies.set(record.id, {userId: manualOwner.userId,
+      principal: manualOwner.connectionPrincipal, promise});
+    return promise;
+  }
+
+  #manualOwnerApplies = new Map<number, {userId: string; principal: string; promise: Promise<void>}>();
+
+  async #applyPendingAction(record: ActionRecord & {type: "action"},
+                           resolvedBy: AiChatAuthorInfo, autoApproved: boolean,
+                           creation?: {creator: Fetcher<GatekeeperUserVerifier>, configuration: string | null},
+                           manualOwner?: {userId: string; connectionPrincipal: string}): Promise<void> {
     let id = record.gatekeeperId;
     // A created resource exists only once its creation applies, and that stays pending until then.
     if (record.action !== "create" && this.#creationPending(id)) {
@@ -4957,6 +5004,57 @@ class OverseerImpl implements AgentHooks {
       created = await (gatekeeper as unknown as Fetcher<Gatekeeper<any> &
           Required<Pick<Gatekeeper<any>, "applyCreation">>>)
           .applyCreation(creation.creator, creation.configuration);
+    } else if (manualOwnerPayloadHash(record.description) !== undefined) {
+      let actionId = record.action;
+      let payloadHash = manualOwnerPayloadHash(record.description)!;
+      let vendorId = gatekeeperVendorId(this.storage.gatekeepers.get(id));
+      if (!manualOwner || !vendorId || !/^[0-9a-f]{64}$/.test(manualOwner.connectionPrincipal)) {
+        throw new Error("An authenticated account-owner decision is required.");
+      }
+      let facet = gatekeeper as OwnerApprovedGatekeeper;
+      // Ownership verification is effect-free: a foreign click must not reserve
+      // the action and prevent its rightful owner from deciding it later.
+      await facet.verifyManualOwnerAction(record.action, manualOwner.connectionPrincipal, payloadHash);
+      let fresh = this.storage.actions.get(record.id);
+      if (!fresh || fresh.type !== "action" || fresh.state !== "pending" || fresh.action !== record.action ||
+          fresh.gatekeeperId !== id || manualOwnerPayloadHash(fresh.description) !== payloadHash ||
+          gatekeeperVendorId(this.storage.gatekeepers.get(id)) !== vendorId) {
+        throw new Error("The action or connection changed during owner verification.");
+      }
+      let original = fresh.manualOwnerDecision;
+      if (original && (original.decision.formatVersion !== 1 || original.decision.mode !== "manual" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(original.decision.decisionId) ||
+          !Number.isFinite(Date.parse(original.decision.decidedAt)) || original.userId !== manualOwner.userId ||
+          original.decision.connectionPrincipal !== manualOwner.connectionPrincipal ||
+          original.decision.vendorId !== vendorId || original.decision.workspaceId !== this.ctx.id.toString() ||
+          original.decision.gatekeeperId !== id || original.decision.workshopActionId !== record.id ||
+          original.decision.actionId !== record.action || original.decision.payloadHash !== payloadHash)) {
+        throw new Error("The original owner decision cannot be replaced.");
+      }
+      let authorization = original ?? {userId: manualOwner.userId, profile: resolvedBy, decision: {
+        formatVersion: 1 as const, decisionId: crypto.randomUUID(), mode: "manual" as const,
+        connectionPrincipal: manualOwner.connectionPrincipal, vendorId,
+        workspaceId: this.ctx.id.toString(), gatekeeperId: id, workshopActionId: record.id,
+        actionId: record.action, payloadHash, decidedAt: new Date().toISOString(),
+      }};
+      fresh.manualOwnerDecision = authorization;
+      this.storage.actions.put(fresh);
+      record = fresh;
+      resolvedBy = authorization.profile;
+      using verifier = new NativeRpcStub<ManualOwnerActionDecisionVerifier>(new ManualOwnerDecisionVerifier(() => {
+        let current = this.storage.actions.get(record.id);
+        if (!current || current.type !== "action" || current.state !== "pending" ||
+            current.action !== authorization.decision.actionId || current.gatekeeperId !== id ||
+            current.manualOwnerDecision?.userId !== authorization.userId ||
+            JSON.stringify(current.manualOwnerDecision.decision) !== JSON.stringify(authorization.decision) ||
+            manualOwnerPayloadHash(current.description) !== payloadHash ||
+            gatekeeperVendorId(this.storage.gatekeepers.get(id)) !== vendorId) {
+          throw new Error("This manual owner decision is no longer available.");
+        }
+        return structuredClone(authorization.decision);
+      }));
+      await facet.applyActionWithManualOwnerApproval(actionId,
+          new GitCacheImpl(this.gitCache, id, record.id), verifier);
     } else {
       // The apply-time cache stub is scoped to the gatekeeper AND to this action (approval can
       // happen long after the session that queued it, so the queue-time stub is gone) -- the
@@ -5877,6 +5975,9 @@ class OverseerImpl implements AgentHooks {
   async submitAction(gatekeeperId: number, action: number | "create",
                      description: ActionDescription, caller: GatekeeperCaller)
       : Promise<void> {
+    if (manualOwnerPayloadHash(description) !== undefined && action === "create") {
+      throw new Error("Resource creation does not support manual owner-approval actions.");
+    }
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
@@ -11613,8 +11714,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let vendorId = gatekeeperVendorId(this.impl.storage.gatekeepers.get(action.gatekeeperId));
     let creator = action.action === "create" && creation && vendorId
         ? await this.#clientUser.getVerifier(creation.accountId, vendorId) : null;
+    let manualOwner = action.description.manualOwnerApproval === undefined ? undefined : {
+      userId: this.clientUserId,
+      connectionPrincipal: vendorId ? await this.#clientUser.getConnectionPrincipal(vendorId) : "",
+    };
     await this.impl.applyPendingAction(action, profile, false,
-        creator ? {creator, configuration: creation?.configuration ?? null} : undefined);
+        creator ? {creator, configuration: creation?.configuration ?? null} : undefined, manualOwner);
 
     // Clearing this manual gate may unblock later auto-eligible pending actions on the same
     // gatekeeper, so cascade a drain (in-order) once this one is applied.
@@ -11766,6 +11871,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     await gatekeeper.rejectAction(action.action);
 
+    if (action.description.manualOwnerApproval !== undefined) {
+      // Approval may have persisted its original decision or completed while
+      // rejection awaited the provider. Never overwrite that evidence with the
+      // pre-await snapshot, or relabel a confirmed commit as a denial. A denial
+      // during unresolved apply retains the decision; it proves no non-commit.
+      let current = this.impl.storage.actions.get(id);
+      if (!current || current.type !== "action" || current.state !== "pending") return;
+      action = current;
+    }
     action.state = "rejected";
     action.appliedAt = new Date();
     action.resolvedBy = profile;

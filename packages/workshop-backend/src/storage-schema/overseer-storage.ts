@@ -31,7 +31,7 @@ import type { CodeChange } from "@gadgets/workshop-shared/code-change";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import type {
   ActionDescription, ActionKind, Gatekeeper, GitObjectType, GitOid, HookController,
-  HookDescription, ObservationDescription,
+  HookDescription, ObservationDescription, ManualOwnerActionDecision,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { SpawnCallableOptions } from "../agent-spawner-binding";
 
@@ -445,6 +445,13 @@ export type ActionRecord = {
    */
   action: number | "create";
   description: ActionDescription;
+  /** Original manual authorization, persisted before provider dispatch. Primitives
+   * only; no decision capability is stored or exposed in action-log DTOs. */
+  manualOwnerDecision?: {
+    userId: string;
+    profile: AiChatAuthorInfo;
+    decision: ManualOwnerActionDecision;
+  };
   resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected); absent while pending (or legacy)
   autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
 } | {

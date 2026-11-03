@@ -5,8 +5,10 @@ import {
   type AuthenticatedApi, type GatekeeperClient, type Overseer,
 } from "@gadgets/workshop-shared/api";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
+import type { ManualOwnerActionDecision } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  startTestGatekeeperHarness, TEST_VENDOR_ID, testActionState, type Harness,
+  startTestGatekeeperHarness, TEST_VENDOR_ID, TEST_GATEKEEPER_WORKER, testActionState,
+  testControl, type Harness,
 } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
@@ -76,6 +78,29 @@ async function provisionAccount(api: RpcStub<AuthenticatedApi>): Promise<Connect
     const accounts = await listConnectedAccounts(api);
     return accounts.find(a => a.vendorId === TEST_VENDOR_ID) ?? null;
   });
+}
+
+/** Protected actions need an actual connect callback, not an auto-provisioned identity. */
+async function connectOwnerAccount(api: RpcStub<AuthenticatedApi>): Promise<ConnectedAccount> {
+  const { url, nonce } = await api.connectAccount(TEST_VENDOR_ID);
+  const label = new URL(url).pathname.slice("/connect/".length);
+  const response = await harness.fetchWorker(TEST_GATEKEEPER_WORKER, url);
+  expect(response.status).toBe(200);
+  const literal = /var ticket = (".*?");\n/.exec(await response.text());
+  if (!literal) throw new Error("The connect handoff page carried no ticket");
+  await api.completeConnectHandoff(JSON.parse(literal[1]!), nonce);
+  return waitFor("the explicitly connected account", async () =>
+    (await listConnectedAccounts(api)).find(account => accountLabel(account) === label) ?? null);
+}
+
+const manualDecisions = async (label: string) => (await testControl<{
+  decisions: Omit<ManualOwnerActionDecision, "connectionPrincipal">[];
+}>(harness, "manual-decisions", { label })).decisions;
+
+async function pendingWrite(ws: RpcStub<Overseer>, value: number) {
+  return waitFor("the protected write to be pending", async () =>
+    (await listAll(ws, "pending")).entries.find(entry =>
+      entry.type === "action" && entry.description.title === `Set the test value to ${value}`) ?? null);
 }
 
 async function reopenAfterRestart(
@@ -237,4 +262,119 @@ it("approvals route to the account whose connection staged the write", async () 
   await aliceSide.overseer.approveAction(aliceEntry.id);
   await expect(actionState(aliceLabel)).resolves.toEqual({ pending: [], value: 21, applyCount: 1 });
   expect((await actionState(bobLabel)).applyCount).toBe(1);
+});
+
+it("a build collaborator cannot apply or reserve the account owner's protected action", async () => {
+  const [owner, collaborator] = nextUsernames("manualowner", "manualcollaborator");
+  using stack = new DisposableStack();
+  const ownerApi = stack.use(await signUp(stack.use(connect(harness.url)), owner));
+  const ownerAccount = await connectOwnerAccount(ownerApi);
+  const ws = stack.use(await ownerApi.newWorkspace());
+  const workspaceId = (await ws.getMetadata()).id;
+  const connection = await ws.newGatekeeper(
+      ownerAccount.id, "https://gadgets-test.example/things/manual-owner");
+  if (!connection) throw new Error("Failed to create the owner's connection");
+  const gatekeeperId = await stack.use(connection).getId();
+
+  const collaboratorApi = stack.use(await signUp(stack.use(connect(harness.url)), collaborator));
+  const collaboratorAccount = await connectOwnerAccount(collaboratorApi);
+  expect(await ws.addCollaborator(collaborator, "build")).toMatchObject({ role: "build" });
+  const callback = stack.use(stubFor(new ObserverConfigRecorder()
+      .alwaysChoose(collaboratorAccount.id, MAX_OBSERVER_PROMPTS)));
+  const collaboratorWs = stack.use(await collaboratorApi.openWorkspace(workspaceId, undefined, callback));
+  using session = await connection.openSession() as RpcStub<TestSession>;
+  const actionId = await session.writeValue(71, { manualOwnerApproval: true });
+  const entry = await pendingWrite(ws, 71);
+  if (entry.type !== "action") throw new Error("Expected a pending action");
+  const label = accountLabel(ownerAccount);
+
+  await expect(collaboratorWs.approveAction(entry.id)).rejects.toThrow(/account owner/i);
+  expect(await manualDecisions(label)).toEqual([]);
+  expect(await testControl(harness, "apply-attempts", { label })).toEqual({ attempts: 0 });
+  expect((await pendingWrite(ws, 71)).state).toBe("pending");
+  expect((await actionState(label)).applyCount).toBe(0);
+
+  await ws.approveAction(entry.id);
+  expect(await actionState(label)).toEqual({ pending: [], value: 71, applyCount: 1 });
+  const decisions = await manualDecisions(label);
+  expect(decisions).toHaveLength(1);
+  expect(decisions[0]).toMatchObject({
+    formatVersion: 1, mode: "manual", vendorId: TEST_VENDOR_ID, workspaceId,
+    gatekeeperId, workshopActionId: entry.id, actionId,
+    payloadHash: entry.description.manualOwnerApproval?.payloadHash,
+  });
+  expect(decisions[0].decisionId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(Number.isFinite(Date.parse(decisions[0].decidedAt))).toBe(true);
+  const approved = (await listAll(ws, "action")).entries.find(action => action.id === entry.id);
+  expect(approved).toMatchObject({ state: "approved", autoApproved: false });
+});
+
+it("a permissive rule cannot apply a protected action, and a restart retries the exact manual decision",
+    async () => {
+  const [owner, collaborator] = nextUsernames("manualretryowner", "manualretrycollaborator");
+  let workspaceId: string;
+  let label: string;
+  let entryId: number;
+  let original: Omit<ManualOwnerActionDecision, "connectionPrincipal">;
+  {
+    using publicApi = connect(harness.url);
+    using api = await signUp(publicApi, owner);
+    const account = await connectOwnerAccount(api);
+    label = accountLabel(account);
+    using ws = await api.newWorkspace();
+    workspaceId = (await ws.getMetadata()).id;
+    using connection = await ws.newGatekeeper(
+        account.id, "https://gadgets-test.example/things/manual-retry");
+    if (!connection) throw new Error("Failed to create the owner's connection");
+    const gatekeeperId = await connection.getId();
+    using session = await connection.openSession() as RpcStub<TestSession>;
+    await ws.setAutoApprovedActionKind(gatekeeperId, { tag: "set-value", label: "Set value" });
+    // Prove this exact enabled rule is live before submitting the protected request.
+    await session.writeValue(80, { autoApprovable: true });
+    await waitFor("the ordinary write to be auto-approved", async () =>
+      (await actionState(label)).applyCount === 1 || null);
+    await session.writeValue(81, { autoApprovable: true, manualOwnerApproval: true });
+    const entry = await pendingWrite(ws, 81);
+    if (entry.type !== "action") throw new Error("Expected a pending action");
+    entryId = entry.id;
+    // The drain runs in waitUntil; use the same settle window as the auto-approval suite.
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect((await pendingWrite(ws, 81)).state).toBe("pending");
+    expect(await manualDecisions(label)).toEqual([]);
+    expect((await actionState(label)).applyCount).toBe(1);
+    expect(await testControl(harness, "apply-attempts", { label })).toEqual({ attempts: 1 });
+
+    await testControl(harness, "fail-next-apply", { label, reason: "manual dispatch interrupted" });
+    await expect(ws.approveAction(entryId)).rejects.toThrow("manual dispatch interrupted");
+    const decisions = await manualDecisions(label);
+    expect(decisions).toHaveLength(1);
+    original = decisions[0];
+    expect(original.payloadHash).toBe(entry.description.manualOwnerApproval?.payloadHash);
+    expect((await pendingWrite(ws, 81)).state).toBe("pending");
+
+    using collaboratorPublicApi = connect(harness.url);
+    using collaboratorApi = await signUp(collaboratorPublicApi, collaborator);
+    const collaboratorAccount = await connectOwnerAccount(collaboratorApi);
+    await ws.addCollaborator(collaborator, "build");
+    using callback = stubFor(new ObserverConfigRecorder()
+        .alwaysChoose(collaboratorAccount.id, MAX_OBSERVER_PROMPTS));
+    using collaboratorWs = await collaboratorApi.openWorkspace(workspaceId, undefined, callback);
+    await collaboratorWs.getMetadata();
+    // Like the routing case above: an account-requiring connection with a live collaborator
+    // restarts the Overseer. Pipeline getId() before the scheduled abort closes these sessions.
+    await (ws.newGatekeeper(account.id, "https://gadgets-test.example/things/manual-restart") as
+        RpcPromise<GatekeeperClient<any>>).getId();
+    await waitFor("the restart to fell the failed decision's workspace instance", () =>
+      ws.getMetadata().then(() => null, () => true));
+  }
+
+  // Both the Overseer and authenticated browser session are new; no verifier survives the boundary.
+  using reopened = await reopenAfterRestart(workspaceId, owner);
+  const ws = reopened.overseer;
+  await ws.approveAction(entryId);
+  expect(await manualDecisions(label)).toEqual([original, original]);
+  expect(await actionState(label)).toEqual({ pending: [], value: 81, applyCount: 2 });
+  expect(await testControl(harness, "apply-attempts", { label })).toEqual({ attempts: 3 });
+  expect((await listAll(ws, "action")).entries.find(entry => entry.id === entryId))
+      .toMatchObject({ state: "approved", autoApproved: false });
 });

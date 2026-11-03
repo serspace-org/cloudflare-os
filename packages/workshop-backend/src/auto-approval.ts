@@ -28,6 +28,7 @@ export interface AutoApprovalStorage {
 export function autoApprovalRule(
     storage: AutoApprovalStorage, gatekeeperId: number, description: ActionDescription)
     : AutoApproveTagRecord | undefined {
+  if (description.manualOwnerApproval !== undefined) return undefined;
   if (description.autoApprovable !== true) return undefined;
   let tag = description.actionKind?.tag;
   if (tag === undefined) return undefined;

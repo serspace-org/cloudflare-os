@@ -27,7 +27,8 @@ import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/co
 import type {
   AccountDescription, ActionDescription, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff,
   Gatekeeper, GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController,
-  HookInitiator, HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame,
+  HookInitiator, HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, GitCache,
+  ManualOwnerActionDecision, ManualOwnerActionDecisionVerifier,
   SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type {
@@ -49,7 +50,9 @@ const TYPES_CODE = `
 /** A stand-in resource whose reads and writes are deterministic and audited. */
 interface TestThing {
   readValue(): Promise<number>;
-  writeValue(value: number): Promise<number>;
+  writeValue(value: number, opts?: {
+    autoApprovable?: boolean; incomplete?: boolean; manualOwnerApproval?: boolean;
+  }): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
   /** Binds a hook the integration test fires through \`/control/fire-hook\`. */
   watch(key: string, callback: ValueHook): Promise<void>;
@@ -80,7 +83,7 @@ type VerifyOutcome = { allow: true } | { allow: false; reason: string };
  */
 type ObserverEvent = { resourceUrl: string; type: "add" | "remove"; id: string };
 
-type PendingTestAction = { id: number; value: number };
+type PendingTestAction = { id: number; value: number; payloadHash?: string };
 type TestActionState = {
   nextId: number;
   pending: PendingTestAction[];
@@ -162,10 +165,10 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     };
   }
 
-  stageAction(label: string, value: number): number {
+  stageAction(label: string, value: number, payloadHash?: string): number {
     const state = this.getActionState(label);
     const id = state.nextId++;
-    state.pending.push({ id, value });
+    state.pending.push({ id, value, ...(payloadHash ? { payloadHash } : {}) });
     this.ctx.storage.kv.put(`actions:${label}`, state);
     return id;
   }
@@ -225,6 +228,20 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
   /** Every applyAction() call, including ones that then fail: a double dispatch shows up here. */
   getApplyAttempts(label: string): number {
     return this.ctx.storage.kv.get<number>(`apply-attempts:${label}`) ?? 0;
+  }
+
+  /** Only explicit connect flows establish an owner; auto-provisioning cannot guess one. */
+  getConnectionPrincipal(label: string): string | null {
+    return this.ctx.storage.kv.get<string>(`connection-principal:${label}`) ?? null;
+  }
+
+  /** Retain decision data, never the verifier capability, including failed dispatches. */
+  recordManualDecision(label: string, decision: ManualOwnerActionDecision): void {
+    this.ctx.storage.kv.put(`manual-decisions:${label}`, [...this.getManualDecisions(label), decision]);
+  }
+
+  getManualDecisions(label: string): ManualOwnerActionDecision[] {
+    return this.ctx.storage.kv.get<ManualOwnerActionDecision[]>(`manual-decisions:${label}`) ?? [];
   }
 
   /** Parks the next applyAction() for `label` until releaseApply(), so a test can race another. */
@@ -316,6 +333,11 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>(key);
     if (callback === undefined) return null;
     this.ctx.storage.kv.delete(key);
+    const principal = await (callback as Fetcher<GatekeeperConnectCallback &
+      Required<Pick<GatekeeperConnectCallback, "getConnectionPrincipal">>>).getConnectionPrincipal();
+    if (principal !== null && principal !== undefined) {
+      this.ctx.storage.kv.put(`connection-principal:${label}`, principal);
+    }
     const handoff = await callback.complete(this.ctx.exports.TestAccount({ props: { label } }));
     this.ctx.storage.kv.put(`callback:${label}`, callback);
     this.ctx.storage.kv.put(`credential:${label}`, 1);
@@ -593,7 +615,9 @@ export interface TestSession {
   readValue(restricted?: boolean, ownerInvitesOnly?: boolean, excludeObservers?: string[])
       : Promise<number>;
   /** `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would. */
-  writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number>;
+  writeValue(value: number, opts?: {
+    autoApprovable?: boolean; incomplete?: boolean; manualOwnerApproval?: boolean;
+  }): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
   watch(key: string, callback: RpcStub<ValueHook>): Promise<void>;
   /** Stores a persistent stub to this connection under `key`, for `/control/call-self-stub`. */
@@ -632,8 +656,16 @@ class TestSessionTarget extends RpcTarget implements TestSession {
   }
 
   async writeValue(
-      value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number> {
-    const id = await this.state.stageAction(this.label, value);
+      value: number, opts?: {
+        autoApprovable?: boolean; incomplete?: boolean; manualOwnerApproval?: boolean;
+      }): Promise<number> {
+    // Freeze a hash of the actual fixture request, not a value supplied by the caller.
+    const payloadHash = opts?.manualOwnerApproval
+      ? Array.from(new Uint8Array(await crypto.subtle.digest(
+          "SHA-256", new TextEncoder().encode(JSON.stringify({ operation: "set-value", value })))),
+          byte => byte.toString(16).padStart(2, "0")).join("")
+      : undefined;
+    const id = await this.state.stageAction(this.label, value, payloadHash);
     try {
       await this.approvalQueue.submitAction(id, {
         title: `Set the test value to ${value}`,
@@ -644,6 +676,7 @@ class TestSessionTarget extends RpcTarget implements TestSession {
         awaitDecision: true,
         actionKind: SET_VALUE_ACTION_KIND,
         ...(opts?.autoApprovable ? { autoApprovable: true } : {}),
+        ...(payloadHash ? { manualOwnerApproval: { formatVersion: 1, payloadHash } } : {}),
       });
       return id;
     } catch (error) {
@@ -773,6 +806,41 @@ export class TestGatekeeper
 
   async applyAction(action: number): Promise<void> {
     if (this.ctx.props.simulated) throw new Error("This test thing has not been created yet.");
+    const pending = (await control(this.ctx.exports).getActionState(this.ctx.props.label))
+        .pending.find(candidate => candidate.id === action);
+    if (pending?.payloadHash) throw new Error("This test action requires manual owner approval.");
+    await this.#dispatchAction(action);
+  }
+
+  /** Read-only preflight: a foreign collaborator must not reserve the durable decision. */
+  async verifyManualOwnerAction(
+      action: number, connectionPrincipal: string, payloadHash: string): Promise<void> {
+    if (this.ctx.props.simulated) throw new Error("This test thing has not been created yet.");
+    const state = control(this.ctx.exports);
+    const principal = await state.getConnectionPrincipal(this.ctx.props.label);
+    if (!principal || principal !== connectionPrincipal) {
+      throw new Error("Only the connected test account owner may approve this action.");
+    }
+    const pending = (await state.getActionState(this.ctx.props.label))
+        .pending.find(candidate => candidate.id === action);
+    if (!pending?.payloadHash || pending.payloadHash !== payloadHash) {
+      throw new Error("The manual test action payload does not match.");
+    }
+  }
+
+  async applyActionWithManualOwnerApproval(
+      action: number, _cache: RpcStub<GitCache>,
+      verifier: RpcStub<ManualOwnerActionDecisionVerifier>): Promise<void> {
+    const decision = await verifier.getDecision();
+    if (decision.formatVersion !== 1 || decision.mode !== "manual" || decision.actionId !== action) {
+      throw new Error("Invalid manual test action decision.");
+    }
+    await this.verifyManualOwnerAction(action, decision.connectionPrincipal, decision.payloadHash);
+    await control(this.ctx.exports).recordManualDecision(this.ctx.props.label, decision);
+    await this.#dispatchAction(action);
+  }
+
+  async #dispatchAction(action: number): Promise<void> {
     const state = control(this.ctx.exports);
     const { label } = this.ctx.props;
     const held = await state.takeNextApplyHold(label);
@@ -953,6 +1021,15 @@ export default {
         value: state.value,
         applyCount: state.applyCount,
       });
+    }
+
+    // Sanitized authorization evidence: never expose the native connection principal.
+    if (url.pathname === "/control/manual-decisions" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      const decisions = await control(ctx.exports).getManualDecisions(label);
+      return Response.json({ decisions: decisions.map(({ connectionPrincipal: _principal, ...decision }) =>
+        decision) });
     }
 
     // Body: {"label": "..."} -> {"configurations": (string | null)[]}, one per applyCreation().
