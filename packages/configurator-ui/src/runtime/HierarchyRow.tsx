@@ -3,9 +3,10 @@ import { cn } from "@cloudflare/kumo/utils";
 import { CaretRightIcon } from "@phosphor-icons/react";
 import { memo, type KeyboardEvent, type ReactNode } from "react";
 import { splitTitle } from "./hierarchyNodes.ts";
+import { radioMark, type RadioMark } from "./radioMark.ts";
 
 type ChoiceBodyProps = {
-  mark: "checked" | "unchecked" | "none";
+  mark: RadioMark;
   icon: ReactNode;
   title: string;
   subtitle?: string;
@@ -31,24 +32,12 @@ const Title = ({ title }: { title: string }) => {
 };
 
 /**
- * What the root's card and every row show: a radio's look (or room for one, so icons line up), an
- * icon on a raised tile and two lines. The look is only a cue; `aria-selected` or `aria-pressed`
- * says it. An unchosen ring strengthens while the nearest `group/choice` ancestor is hovered.
+ * What the root's card and every row show: a radio's look ({@link radioMark}), an icon on a raised
+ * tile and two lines. The look is only a cue; `aria-selected` or `aria-pressed` says it.
  */
 export const ChoiceBody = ({ mark, icon, title, subtitle, badge, meta }: ChoiceBodyProps) => (
   <>
-    {/* A ring, and a dot inside it when chosen, in Kumo's contrast colour as its own Radio is:
-        near-black in light mode, white in dark. The dot is the radio's own fill showing through an
-        inset ring of the background, so it stays centred however the browser rounds the border
-        (1.5px draws as 1px at 1x); a 3px gap keeps its edges on whole pixels at 1x and 2x. Unchosen,
-        the ring is Kumo's interactive border and takes the subtle text colour while its row is
-        hovered, which shows against a hovered row in dark mode as the inactive colour does not. */}
-    <span
-      className={cn("size-4 shrink-0 rounded-full",
-        mark !== "none" && "border-[1.5px]",
-        mark === "checked" && "border-kumo-contrast bg-kumo-contrast inset-ring-3 inset-ring-kumo-base",
-        mark === "unchecked" && "border-kumo-interact bg-kumo-base group-hover/choice:border-(color:--text-color-kumo-subtle)")}
-    />
+    <span className={radioMark(mark)} />
     {/* A raised tile without a border: a translucent fill of the icon's grey, which shows on a hovered
         or chosen row as on a plain one, and Kumo's smallest shadow. */}
     <span

@@ -145,6 +145,9 @@ export type GitHubActionData = Parameters<GitHubGatekeeperImpl["submitActionForA
 /** The listing methods `TestHooks.listingPages` drives. */
 export type ListingMethod = "listIssues" | "searchIssues" | "listPullRequests" | "searchPullRequests";
 
+/** One call of a `TestHooks.sessionRead` chain: a method on the previous call's result. */
+export type SessionCall = { method: string; args?: unknown[] };
+
 type TestExports = {
   GitHubGatekeeperImpl(options: { props: GatekeeperProps }):
     DurableObjectClass<GitHubGatekeeperImpl>;
@@ -203,6 +206,7 @@ type GatekeeperFacet = Pick<GitHubGatekeeperImpl, "gitPull" | "addObserver" | "r
   prepareSetTitle(kind: "issue" | "pull", id: string, title: string): Promise<IssueEditActionData>;
   prepareChangeState(kind: "issue" | "pull", id: string, state: "open" | "closed")
     : Promise<IssueEditActionData>;
+  startSession(queue: unknown): Promise<unknown>;
 } & Record<ListingMethod, (query: never, pageSize: number) => Promise<Cursor<unknown>>>;
 
 async function drain<T>(cursor: { next(): Promise<T[] | null> }): Promise<T[]> {
@@ -559,6 +563,33 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
         }
       }
       return pages;
+    });
+  }
+
+  /**
+   * Opens the binding's session over `queue`, as executeCode would, and makes a chain of calls,
+   * each on the previous call's result (a pull request it opened, a check run, ...). With `drain`,
+   * the last result is a cursor, drained here (cursor stubs cannot ride back).
+   */
+  async sessionRead(
+    facetName: string, props: GatekeeperProps, queue: unknown, calls: SessionCall[], drainLast = false,
+  ): Promise<Outcome<unknown>> {
+    return await outcome(async () => {
+      type Stub = Record<string, (...args: unknown[]) => Promise<unknown>> & Partial<Disposable>;
+      const opened: Stub[] = [];
+      try {
+        let result = await this.#gatekeeper(facetName, props).startSession(queue);
+        for (const call of calls) {
+          const target = result as Stub;
+          opened.push(target);
+          result = await target[call.method](...(call.args ?? []));
+        }
+        if (!drainLast) return result;
+        opened.push(result as Stub);
+        return await drain(result as Cursor<unknown>);
+      } finally {
+        for (const stub of opened) stub[Symbol.dispose]?.();
+      }
     });
   }
 
