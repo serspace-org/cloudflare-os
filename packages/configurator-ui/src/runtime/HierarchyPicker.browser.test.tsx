@@ -834,6 +834,16 @@ describe("search", () => {
     await expect.element(list()).toHaveAccessibleName("Loose");
   });
 
+  it("lists the open container when a search finds it, as a pasted link to it would", async () => {
+    await render({ loadItems: source({ reports: [reports] }), searchPlaceholder: "Search Drive" });
+    await userEvent.click(option("Reports"));
+    await expect.element(option("Everything in Reports")).toBeVisible();
+
+    await userEvent.fill(page.getByRole("searchbox", { name: "Search Drive" }), "reports");
+    await expect.element(list()).toHaveAccessibleName("Search results");
+    expect(page.getByRole("option").elements().map(row => row.textContent)).toEqual(["Reports"]);
+  });
+
   it("tells same-named results apart by where they live and what they say of themselves", async () => {
     const copies: Item[] = [
       { ...q1, subtitle: "Owned by Kim", path: [{ id: "reports", title: "Reports" }] },
@@ -1232,6 +1242,19 @@ describe("tabs", () => {
     expect(onChange).toHaveBeenLastCalledWith(null, null);
     // The root is never listed: only its tabs are.
     expect(loadItems.mock.calls.map(([request]) => request.parentId)).toEqual(["sites", "marketing", "files"]);
+  });
+
+  it("opens a container a view tab lists where its path says it lives, so its breadcrumb leads up", async () => {
+    const recent = { id: "recent", title: "Recent" };
+    const loadItems = vi.fn<LoadItems>(async ({ parentId }) => ({
+      items: parentId === "recent" ? [{ ...marketing, path: [{ id: "sites", title: "Sites" }] }] : TABBED[parentId] ?? [],
+    }));
+    await render({ loadItems, tabs: [recent, ...TABS] });
+
+    await userEvent.click(option("Marketing"));
+    await expect.element(crumbs()).toMatchTextContent(/^SitesMarketing$/);
+    await expect.element(tab("Sites")).toHaveAttribute("aria-selected", "true");
+    await expect.element(option("Plan.docx")).toBeVisible();
   });
 
   it("offers a tab that says it can be chosen, and keeps the whole hierarchy's choice across tabs", async () => {
