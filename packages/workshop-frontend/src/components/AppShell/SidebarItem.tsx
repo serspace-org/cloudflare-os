@@ -33,7 +33,7 @@ export default function SidebarItem({
   let target = typeof to === 'string' ? to : ''
   if (params) {
     for (const [key, value] of Object.entries(params as Record<string, string>)) {
-      target = target.replaceAll(`$${key}`, String(value))
+      target = target.replaceAll(key === '_splat' ? '$' : `$${key}`, String(value))
     }
   }
   const isActive = matchPrefix

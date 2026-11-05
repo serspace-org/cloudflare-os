@@ -1,4 +1,5 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, redirect } from '@tanstack/react-router'
+import { appLink, appBase } from '../features/gatekeeper-app-routing/appRoutes'
 import GatekeeperAppPage from '../GatekeeperAppPage'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useGatekeeperApps } from '../useGatekeeperApps'
@@ -12,6 +13,9 @@ import { useGatekeeperApps } from '../useGatekeeperApps'
  * nesting inside the /gatekeepers connectors page's component.
  */
 export const Route = createFileRoute('/gatekeepers_/$appId')({
+  beforeLoad: ({ params }) => {
+    if (appBase(params.appId)) throw redirect({ ...appLink(params.appId), replace: true })
+  },
   component: GatekeeperApp,
 })
 

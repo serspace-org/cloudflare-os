@@ -1,7 +1,11 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { type RpcPromise, RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
-import { useNavigate } from '@tanstack/react-router'
+import { useBlocker, useNavigate, useRouter } from '@tanstack/react-router'
+import type { GatekeeperAppNavigation, GatekeeperAppNavigationHost } from '@gadgets/workshop-shared/app-navigation'
+import { AppNavigation, disposeNavigation, updateNavigationPath } from './features/gatekeeper-app-routing/AppNavigation'
+import { validateAppPath } from './features/gatekeeper-app-routing/appRoutes'
+import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 import type {
   GatekeeperUiFrame,
   GatekeeperUserSelectionReceiver,
@@ -42,6 +46,7 @@ type OpenPrompt = (prompt: string) => void
 // Opening throws synchronously if refused; returning transfers receiver ownership to the picker.
 type OpenUserPicker = (receiver: RpcStub<GatekeeperUserSelectionReceiver>) => Promise<void>
 type CancelUserPicker = () => void
+const updateAppPath = Symbol('updateAppPath')
 
 type UserPicker = {
   id: number
@@ -94,7 +99,8 @@ function iframeStyleForOverlay(overlay: OverlayState): CSSProperties {
 // The host capability exposed to the sandboxed app (the gatekeeper's iframe UI) over the MessagePort
 // RPC session. The app uses `ui` to reach the gatekeeper's own capability, which Workshop relays and
 // rate-limits. `setPresenting` stays in Workshop and only grows/restores the iframe's layout.
-class GatekeeperAppHostImpl extends RpcTarget {
+class GatekeeperAppHostImpl extends RpcTarget implements GatekeeperAppNavigationHost {
+  readonly #navigation: AppNavigation | null
   readonly #ui: RpcStub<RpcTarget>
   readonly #disposeRateLimiter: () => void
   readonly #present: PresentController
@@ -120,8 +126,10 @@ class GatekeeperAppHostImpl extends RpcTarget {
     resolveWorkspaceTitles: ResolveWorkspaceTitles,
     openUserPicker: OpenUserPicker,
     cancelUserPicker: CancelUserPicker,
+    navigation: AppNavigation | null,
   ) {
     super()
+    this.#navigation = navigation
     this.#theme = theme
     const { capability: ui, dispose } = createRateLimitedCapability(capability, {
       maxConcurrency: 8,
@@ -142,6 +150,14 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   get ui(): RpcStub<RpcTarget> {
     return this.#ui
+  }
+
+  async getNavigation(): Promise<GatekeeperAppNavigation | null> {
+    return this.#navigation
+  }
+
+  [updateAppPath](path: string) {
+    this.#navigation?.[updateNavigationPath](path)
   }
 
   // Navigate to a workspace the app knows about. The IDs are validated here because the app is
@@ -241,6 +257,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   // Cancel the rate limiter's pending resume timer once this host is no longer in use.
   dispose() {
+    this.#navigation?.[disposeNavigation]()
     this.#disposeRateLimiter()
     this.#cancelUserPicker()
     this.#themeReceiver?.[Symbol.dispose]?.()
@@ -264,11 +281,21 @@ class GatekeeperAppHostImpl extends RpcTarget {
  * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
  * The iframe fills its parent container.
  */
-export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
+export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, appRouteBase }: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
+  appRouteBase?: string,
 }) {
   const navigate = useNavigate()
+  const router = useRouter()
+  const blockedRef = useRef(false)
+  const cancelledNavigationRef = useRef<(() => void) | null>(null)
+  const shouldBlock = useCallback(() => blockedRef.current, [])
+  const blocker = useBlocker({
+    shouldBlockFn: shouldBlock,
+    enableBeforeUnload: shouldBlock,
+    withResolver: true,
+  })
   const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const sessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
@@ -410,6 +437,26 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
         resolveWorkspaceTitles,
         openUserPicker,
         cancelUserPicker,
+        appRouteBase ? new AppNavigation(
+          validateAppPath(router.state.location.pathname.slice(appRouteBase.length) || '/'),
+          (path, replace) => new Promise<void>((resolve, reject) => {
+            // TanStack's navigate promise waits for a load even when history cancels a blocked
+            // transition. Settle the app's call on Cancel too, without changing the route snapshot.
+            const finish = () => {
+              if (cancelledNavigationRef.current === finish) cancelledNavigationRef.current = null
+              resolve()
+            }
+            cancelledNavigationRef.current = finish
+            router.navigate({
+              to: '/$', params: { _splat: appRouteBase.slice(1) + (path === '/' ? '' : path) },
+              replace,
+            }).then(finish, (error) => {
+              if (cancelledNavigationRef.current === finish) cancelledNavigationRef.current = null
+              reject(error)
+            })
+          }),
+          (blocked) => { blockedRef.current = blocked },
+        ) : null,
       )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
@@ -432,7 +479,17 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
     }
 
     window.addEventListener('message', handleMessage)
+    // Observe committed locations, including POP, rather than reacquiring the app UI on each path.
+    const unsubscribe = router.subscribe('onResolved', ({ toLocation }) => {
+      if (!appRouteBase) return
+      const path = toLocation.pathname
+      if (path === appRouteBase || path.startsWith(`${appRouteBase}/`)) {
+        hostRef.current?.[updateAppPath](path.slice(appRouteBase.length) || '/')
+      }
+    })
     return () => {
+      unsubscribe()
+      cancelledNavigationRef.current?.()
       window.removeEventListener('message', handleMessage)
       sessionRef.current?.[Symbol.dispose]?.()
       sessionRef.current = null
@@ -443,10 +500,24 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
   }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, cancelUserPicker, openPrompt, openTarget,
-      openUserPicker, present, resolveWorkspaceTitles, setOverlayPhase])
+       openUserPicker, present, resolveWorkspaceTitles, setOverlayPhase, appRouteBase, router])
 
   return (
     <>
+      {blocker.status === 'blocked' && <DeleteConfirmationDialog
+        open={blocker.status === 'blocked'}
+        title="Leave this app view?"
+        description="Unsaved changes may be lost. Work already submitted may continue after you leave."
+        confirmLabel="Discard and leave"
+        aboveAppOverlay
+        onOpenChange={(open) => {
+          if (!open) {
+            blocker.reset?.()
+            cancelledNavigationRef.current?.()
+          }
+        }}
+        onConfirm={() => blocker.proceed?.()}
+      />}
       <iframe
         ref={iframeRef}
         srcDoc={frame.iframeHtml}

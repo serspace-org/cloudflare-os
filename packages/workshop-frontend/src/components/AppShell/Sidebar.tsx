@@ -14,6 +14,7 @@ import {
 import { useSiteName } from '../../ServerConfigContext'
 import SiteLogo from '../SiteLogo'
 import { useGatekeeperApps } from '../../useGatekeeperApps'
+import { appLink } from '../../features/gatekeeper-app-routing/appRoutes'
 import { openCommandPalette } from './commandPaletteBus'
 import SidebarItem from './SidebarItem'
 import {
@@ -152,8 +153,8 @@ export default function Sidebar({
               return (
               <SidebarItem
                 key={app.id}
-                to="/gatekeepers/$appId"
-                params={{ appId: app.id }}
+                {...appLink(app.id)}
+                matchPrefix
                 label={app.title}
                 icon={
                   maskUrl ? (

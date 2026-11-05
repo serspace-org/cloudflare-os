@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { Hexagon, List, X } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../AuthContext'
 import { useGatekeeperApps } from '../useGatekeeperApps'
+import { appLink } from '../features/gatekeeper-app-routing/appRoutes'
 import { useSiteName } from '../ServerConfigContext'
 import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
@@ -82,8 +83,7 @@ export default function Header() {
             {gatekeeperApps.map((app) => (
               <Link
                 key={app.id}
-                to="/gatekeepers/$appId"
-                params={{ appId: app.id }}
+                {...appLink(app.id)}
                 className={navLinkClass}
                 activeProps={{ className: navLinkActiveClass }}
               >
@@ -147,8 +147,7 @@ export default function Header() {
             {gatekeeperApps.map((app) => (
               <Link
                 key={app.id}
-                to="/gatekeepers/$appId"
-                params={{ appId: app.id }}
+                {...appLink(app.id)}
                 onClick={closeMobileMenu}
                 className={navLinkClass}
                 activeProps={{ className: navLinkActiveClass }}
