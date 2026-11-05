@@ -14,6 +14,7 @@ function milestone(number: number) {
 class AssignmentApi {
   readonly writes: { method: string; path: string; body: Record<string, unknown> }[] = [];
   ignore = false;
+  loseReply = false;
   state = { milestone: milestone(1) as ReturnType<typeof milestone> | null, assignees: [{ login: "old" }] };
 
   constructor(readonly pull = false) {
@@ -39,6 +40,7 @@ class AssignmentApi {
         if ("milestone" in body) this.state.milestone = body.milestone === null ? null : milestone(body.milestone as number);
         if ("assignees" in body) this.state.assignees = (body.assignees as string[]).map(login => ({ login: login.toLowerCase() }));
       }
+      if (this.loseReply) { this.loseReply = false; throw new Error("Lost PATCH reply"); }
       return Response.json(this.row());
     }
     if (path.endsWith("/assignees")) {
@@ -53,7 +55,10 @@ class AssignmentApi {
       return number === 404 ? Response.json({ message: "Not Found" }, { status: 404 }) : Response.json(milestone(number));
     }
     if (/\/(issues|pulls)\/42$/.test(path)) return Response.json(this.row());
-    if (path === "/search/issues") return Response.json({ items: [this.row()] });
+    if (path === "/search/issues") {
+      const assignee = /assignee:"([^"]+)"/.exec(url.searchParams.get("q") ?? "")?.[1];
+      return Response.json({ items: !assignee || this.state.assignees.some(user => user.login === assignee) ? [this.row()] : [] });
+    }
     if (path.endsWith("/issues") || path.endsWith("/pulls")) {
       return Response.json(url.searchParams.get("page") === "1" ? [this.row()] : []);
     }
@@ -182,6 +187,59 @@ describe("milestone and assignee assignment", () => {
     g.api.ignore = false;
     await g.apply(id);
     expect(g.api.writes).toHaveLength(2);
+  });
+
+  it.each(["setMilestone", "setAssignees"] as const)("undoes %s to its actual apply-time value after an earlier rejection", async method => {
+    const g = await setup();
+    await g.change(method, method === "setMilestone" ? 3 : ["ada"]);
+    await g.change(method, method === "setMilestone" ? 4 : ["grace"]);
+    await g.reject(g.queue.actions[0].id);
+    const id = g.queue.actions[1].id;
+    await g.apply(id);
+    await g.hooks.restartGatekeeper("assignment");
+    await g.revert(id);
+    expect(g.api.state).toMatchObject({ milestone: { number: 1 }, assignees: [{ login: "old" }] });
+  });
+
+  it.each(["setMilestone", "setAssignees"] as const)("preserves %s undo state across a lost PATCH reply and restart", async method => {
+    const g = await setup();
+    await g.change(method, method === "setMilestone" ? 3 : ["ada"]);
+    const id = g.queue.actions[0].id;
+    g.api.loseReply = true;
+    await expect(g.apply(id)).rejects.toThrow("Lost PATCH reply");
+    await g.hooks.restartGatekeeper("assignment");
+    await g.apply(id);
+    expect(g.api.writes).toHaveLength(1);
+    await g.revert(id);
+    await g.revert(id);
+    expect(g.api.writes).toHaveLength(2);
+    expect(g.api.state).toMatchObject({ milestone: { number: 1 }, assignees: [{ login: "old" }] });
+  });
+
+  it.each(["setMilestone", "setAssignees"] as const)("refuses to undo %s over a newer GitHub edit", async method => {
+    const g = await setup();
+    await g.change(method, method === "setMilestone" ? 3 : ["ada"]);
+    const id = g.queue.actions[0].id;
+    await g.apply(id);
+    g.api.state = { milestone: milestone(8), assignees: [{ login: "grace" }] };
+    await expect(g.revert(id)).rejects.toThrow("newer assignment");
+    expect(g.api.writes).toHaveLength(1);
+  });
+
+  it("keeps provider comment-text matching while finding pending assignees", async () => {
+    const g = await setup();
+    const search = async (assignee: string) => {
+      const pages = await unwrap(g.hooks.listingPages("assignment", g.props, "searchIssues",
+        { text: "comment-only-match", assignee, state: "all" }, 50)) as (GitHubIssueSummary[] | null)[];
+      return pages.flatMap(page => page ?? []).map(issue => issue.id);
+    };
+    expect(await search("ada")).toEqual([]);
+    await g.change("setAssignees", ["ada"]);
+    expect(await search("ada")).toEqual(["42"]);
+    expect(await search("old")).toEqual([]);
+    await g.reject(g.queue.actions[0].id);
+    expect(await search("ada")).toEqual([]);
+    expect(await search("old")).toEqual(["42"]);
   });
 
   it("does not stage invalid milestones or unassignable users", async () => {

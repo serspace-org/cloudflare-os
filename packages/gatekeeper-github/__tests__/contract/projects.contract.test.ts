@@ -5,6 +5,8 @@ import { discoverProjects, parseProjectUrl, projectFields, projectItem, projectI
 const token = process.env.CONTRACT_GITHUB_PROJECT_TOKEN;
 const url = process.env.CONTRACT_GITHUB_PROJECT_URL;
 
+if (!!token !== !!url) throw new Error("Set both CONTRACT_GITHUB_PROJECT_TOKEN and CONTRACT_GITHUB_PROJECT_URL.");
+
 /** Explicitly opt-in and read-only: the project and token are separate from the hooks' fixtures. */
 describe.skipIf(!token || !url)("GitHub whole-project GraphQL contract", () => {
   it("resolves a project and reads definitions, items, and their values", async () => {
@@ -18,6 +20,7 @@ describe.skipIf(!token || !url)("GitHub whole-project GraphQL contract", () => {
     const fields = await projectFields(api, project.id, 2);
     expect(fields.items.every(field => !!field.id && !!field.name && !!field.dataType)).toBe(true);
     const page = await projectItems(api, project.id, 2);
+    expect(page.items.length).toBeGreaterThan(0);
     expect(page.items.length).toBeLessThanOrEqual(2);
     if (page.next) await projectItems(api, project.id, 2, page.next);
     for (const item of page.items) {

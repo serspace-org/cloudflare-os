@@ -85,7 +85,10 @@ is approved; apply waits for the real GitHub number. The separate action kinds a
 
 GitHub requires repository write access for these changes. The connector validates the selected
 milestone and assignee eligibility before staging, and verifies GitHub's PATCH response so a
-silently ignored change is reported as an error rather than success.
+silently ignored change is reported as an error rather than success. Undo restores the actual
+assignment read at apply time, with durable retry state for lost replies. It refuses to overwrite
+a different assignment found on a fresh read. GitHub's update API offers no atomic comparison
+for these fields, so an external edit between that read and PATCH remains a provider limitation.
 
 ## Whole-project connections
 
@@ -125,7 +128,13 @@ read permission configured in the App itself, plus access to any private reposit
 The optional, read-only GraphQL contract check uses `CONTRACT_GITHUB_PROJECT_TOKEN` and
 `CONTRACT_GITHUB_PROJECT_URL`, separately from the hooks' repository fixtures. Run it with
 `pnpm --dir packages/gatekeeper-github exec vitest run -c vitest.contract.config.ts __tests__/contract/projects.contract.test.ts`.
-The token must be able to read the selected project. No projects or issues are created or edited.
+The token must be able to read the selected project, which must contain at least one item so item
+and field-value queries are exercised. No projects or issues are created or edited. The scheduled
+and manually dispatched `GitHub contract` workflow runs this check in its own job, independently
+of the webhook fixtures. Configure the repository secret `CONTRACT_GITHUB_PROJECT_TOKEN` and
+variable `CONTRACT_GITHUB_PROJECT_URL`; configuring only one fails with an actionable error,
+while leaving both unset explicitly skips the check. The token is passed only to configuration
+validation and the test step, never dependency installation.
 
 ## Auto-approval
 

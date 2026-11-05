@@ -77,7 +77,7 @@ describe("project API boundaries", () => {
   });
 
   it.each(["item", "values"])("rejects a foreign item when reading %s", async method => {
-    vi.stubGlobal("fetch", async () => Response.json({ data: { node: {
+    vi.stubGlobal("fetch", async () => Response.json({ data: { project: { id: "P" }, node: {
       id: "item", isArchived: false, project: { id: "OTHER" }, content: null,
       fieldValues: { nodes: [], pageInfo: end },
     } } }));

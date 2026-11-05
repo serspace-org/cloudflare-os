@@ -293,7 +293,12 @@ type StoredProvisionalResource = {
 
 type StoredActionState = "staged" | "pending" | "approved" | "rejected";
 
+type AssignmentRevertInfo =
+  | { type: "milestoneAssignment"; before: number | null; after: number | null; reverted?: boolean }
+  | { type: "assigneeAssignment"; before: string[]; after: string[]; reverted?: boolean };
+
 type GitHubRevertInfo =
+  | AssignmentRevertInfo
   | {
       type: "issueComment";
       commentId: number;
@@ -2105,6 +2110,7 @@ function assertSearchScope(
 @validateRpc()
 export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImplProps>
   implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
+  readonly #assignmentWrites = new SerialTaskQueue();
 
   #pendingActionsCache?: GitHubAction[];
 
@@ -3551,6 +3557,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const remoteSort = query.sort ?? "created";
     const remoteDirection = query.direction ?? "desc";
     const compare = issueComparator(remoteSort, remoteDirection);
+    // GitHub cannot see pending assignee edits. Keep its text/comment matching, but broaden the
+    // provider query while such edits exist, then apply the requested assignee to overlaid rows.
+    const pendingAssignees = this.#listPendingActions().some(action =>
+      action.type === "setAssignees" && action.targetKind === "issue");
+    const remoteQuery = pendingAssignees ? { ...query, assignee: undefined } : query;
 
     const provisionals = (await Promise.all(this.#listPendingActions()
       .filter((action): action is CreateIssueAction => action.type === "createIssue")
@@ -3565,10 +3576,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         // passed to another repository, and GitHub refuses a search by a renamed one's old name.
         const current = await this.#currentRepoName();
         const cacheKey = this.#cacheKey(
-          "search-issues-scoped-v2", current.owner, current.repo, stableKey(query), `p${page}`);
+          "search-issues-scoped-v2", current.owner, current.repo, stableKey(remoteQuery), `p${page}`);
         const results = await this.#loadCachedWithEtag<CachedIssueSearchResult[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.searchIssuesConditional(
-            buildIssueSearchQuery(current.owner, current.repo, query), page, perPage, remoteSort,
+            buildIssueSearchQuery(current.owner, current.repo, remoteQuery), page, perPage, remoteSort,
             remoteDirection, { ifNoneMatch: etag }));
           if (raw.status === 304) {
             return raw;
@@ -4506,7 +4517,6 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
         if (!realId) throw new Error(`Target ${action.targetId} has not been created on GitHub yet.`);
         await this.#writeAssignment(action, Number(realId), false);
-        this.#markActionApproved(action);
         return;
       }
       case "addLabels": {
@@ -4924,16 +4934,54 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     }
   }
 
-  /** Verify PATCH results: GitHub may return 200 while silently ignoring assignment changes. */
+  /** Persist apply-time undo state before PATCH, retaining it across failures and lost replies. */
   async #writeAssignment(action: SetMilestoneAction | SetAssigneesAction, realId: number, revert: boolean): Promise<void> {
-    const milestone = action.type === "setMilestone" ? (revert ? action.previousMilestone : action.milestone?.number ?? null) : null;
-    const assignees = action.type === "setAssignees" ? (revert ? action.previousAssignees : action.assignees) : [];
-    const result = await this.#withApi(api => api.updateIssue(action.owner, action.repo, realId,
-      action.type === "setMilestone" ? { milestone } : { assignees }));
-    this.#clearCaches();
-    const applied = action.type === "setMilestone" ? (result.milestone?.number ?? null) === milestone :
-      sameAssignees((result.assignees ?? []).map(user => user.login), assignees);
-    if (!applied) throw new Error("GitHub did not apply the requested assignment. Check repository write access and assignee eligibility.");
+    await this.#assignmentWrites.run(async () => {
+      const record = this.#requireActionRecord(action.approvalId);
+      if (!revert && record.state === "approved") return;
+      if (record.state === "rejected") throw new Error("This assignment action was discarded.");
+      let info = record.revertInfo;
+      if (revert && (!info || (info.type !== "milestoneAssignment" && info.type !== "assigneeAssignment"))) {
+        throw new Error("This assignment has no apply-time undo state.");
+      }
+      if ((info?.type === "milestoneAssignment" || info?.type === "assigneeAssignment") && info.reverted) return;
+      const current = await this.#readApi(api => api.getIssue(action.owner, action.repo, realId));
+      if (!info) {
+        info = action.type === "setMilestone"
+          ? { type: "milestoneAssignment", before: current.milestone?.number ?? null, after: action.milestone?.number ?? null }
+          : { type: "assigneeAssignment", before: (current.assignees ?? []).map(user => user.login), after: [...action.assignees] };
+        record.revertInfo = info;
+        this.#putActionRecord(action.approvalId, record);
+      }
+      if (info.type !== "milestoneAssignment" && info.type !== "assigneeAssignment") {
+        throw new Error("Invalid assignment undo state.");
+      }
+      const matches = (result: GitHubIssueResponse, target: "before" | "after") => info.type === "milestoneAssignment"
+        ? (result.milestone?.number ?? null) === info[target]
+        : sameAssignees((result.assignees ?? []).map(user => user.login), info[target]);
+      const target = revert ? "before" : "after";
+      if (!matches(current, target)) {
+        if (!matches(current, revert ? "after" : "before")) {
+          throw new Error("The assignment changed on GitHub. Refusing to overwrite the newer assignment; review it and submit a new change.");
+        }
+        let result: GitHubIssueResponse;
+        try {
+          result = await this.#withApi(api => api.updateIssue(action.owner, action.repo, realId,
+            info.type === "milestoneAssignment" ? { milestone: info[target] } : { assignees: info[target] }));
+        } finally {
+          this.#clearCaches();
+        }
+        if (!matches(result, target)) throw new Error("GitHub did not apply the requested assignment. Check repository write access and assignee eligibility.");
+      }
+      if (revert) {
+        info.reverted = true;
+        record.revertInfo = info;
+        this.#putRetiredActionRecord(action.approvalId, record);
+      } else {
+        this.#markActionApproved(action, info);
+      }
+      this.#clearCaches();
+    });
   }
 
   async listAssignees(pageSize: number, queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubActor>> {

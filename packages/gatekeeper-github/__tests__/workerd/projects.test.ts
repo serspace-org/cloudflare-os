@@ -17,6 +17,8 @@ class FakeProjectApi {
   scopeDenied = false;
   afters: (string | null)[] = [];
   resolutions = 0;
+  queries: string[] = [];
+  ownerProjectAllowed = true;
   moveOnNextValuesPage = false;
   constructor() {
     vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => this.fetch(new Request(input, init)));
@@ -28,6 +30,7 @@ class FakeProjectApi {
         { status: this.repoTransient ? 503 : this.repoAllowed ? 200 : 404 });
     }
     const { query, variables } = await request.json<{ query: string; variables: { after?: string; id?: string; item?: string } }>();
+    this.queries.push(query);
     if (this.scopeDenied) return Response.json({ errors: [{ type: "INSUFFICIENT_SCOPES" }] });
     if (query.includes("query ResolveProject")) {
       this.resolutions++;
@@ -51,12 +54,12 @@ class FakeProjectApi {
     if (query.includes("query ProjectItemFields")) {
       if (!next && this.moveOnNextValuesPage) item.project.id = "FOREIGN";
       this.afters.push(variables.after ?? null);
-      return Response.json({ data: { node: { ...item, fieldValues: { nodes: [{
+      return Response.json({ data: { project: this.ownerProjectAllowed ? { id: "P" } : null, node: { ...item, fieldValues: { nodes: [{
         __typename: "ProjectV2ItemFieldSingleSelectValue", optionId: "done", name: "Done",
         field: { id: "F", name: "Status", dataType: "SINGLE_SELECT" },
       }], pageInfo } } } });
     }
-    if (query.includes("query ProjectItem(")) return Response.json({ data: { node: item } });
+    if (query.includes("query ProjectItem(")) return Response.json({ data: { project: this.ownerProjectAllowed ? { id: "P" } : null, node: item } });
     if (query.includes("query ProjectFields")) return Response.json({ data: { node: {
       id: "P", fields: { nodes: [{ id: "F", name: "Status", dataType: "SINGLE_SELECT", options: [{ id: "done", name: "Done" }] }], pageInfo },
     } } });
@@ -164,6 +167,26 @@ describe("whole-project connections", () => {
     const result = await g.read("values", { calls: 2 });
     expect(result.pages).toMatchObject([[{ value: { name: "Done" } }], { error: expect.stringContaining("does not belong") }]);
     expect(result.observations).toHaveLength(1);
+  });
+
+  it.each(["items", "fields", "values"] as const)("uses one GraphQL request per %s page after session setup", async method => {
+    const api = new FakeProjectApi();
+    const g = await setup();
+    await g.read(method);
+    expect(api.queries).toHaveLength(4); // Resolve + session metadata + two pages.
+    expect(api.queries.filter(query => query.includes("query ProjectMetadata"))).toHaveLength(1);
+  });
+
+  it.each(["item", "values"] as const)("checks project access alongside %s content", async method => {
+    const api = new FakeProjectApi();
+    const g = await setup();
+    api.ownerProjectAllowed = false;
+    if (method === "item") await expect(g.read(method)).rejects.toThrow("unavailable");
+    else {
+      const result = await g.read(method, { calls: 1 });
+      expect(result.pages).toMatchObject([{ error: expect.stringContaining("unavailable") }]);
+      expect(result.observations).toEqual([]);
+    }
   });
 
   it("provides a reconnect error when project permission is missing", async () => {

@@ -87,8 +87,9 @@ export async function projectItems(api: GitHubApi, id: string, first: number, af
 
 /** Revalidate membership when opening an item or reading another page of its fields. */
 export async function projectItem(api: GitHubApi, projectId: string, itemId: string): Promise<GitHubProjectEntry> {
-  const { node } = await api.planningGraphql<{ node: ProjectItemResponse | null }>(
-    `query ProjectItem($id: ID!) { node(id: $id) { ... on ProjectV2Item { ${ITEM} } } }`, { id: itemId });
+  const { project, node } = await api.planningGraphql<{ project: { id: string } | null; node: ProjectItemResponse | null }>(
+    `query ProjectItem($id: ID!, $project: ID!) { project: node(id: $project) { ... on ProjectV2 { id } } node(id: $id) { ... on ProjectV2Item { ${ITEM} } } }`, { id: itemId, project: projectId });
+  if (project?.id !== projectId) return missing();
   if (!node || node.id !== itemId || node.project.id !== projectId) {
     throw new Error("Project item does not belong to the connected project.");
   }
@@ -97,13 +98,15 @@ export async function projectItem(api: GitHubApi, projectId: string, itemId: str
 
 /** Read one item's values, with content and project identity from the same GraphQL result. */
 export async function projectItemFields(api: GitHubApi, projectId: string, itemId: string, first: number, after?: string) {
-  const query = `query ProjectItemFields($item: ID!, $first: Int!, $after: String) {
+  const query = `query ProjectItemFields($item: ID!, $project: ID!, $first: Int!, $after: String) {
+    project: node(id: $project) { ... on ProjectV2 { id } }
     node(id: $item) { ... on ProjectV2Item {
       ${ITEM} fieldValues(first: $first, after: $after) { ${PAGE} nodes { ${VALUE_FIELDS} } }
     } }
   }`;
-  const { node } = await api.planningGraphql<{ node: (ProjectItemResponse & { fieldValues: GraphConnection<ProjectFieldResponse> }) | null }>(
-    query, { item: itemId, first, after });
+  const { project, node } = await api.planningGraphql<{ project: { id: string } | null; node: (ProjectItemResponse & { fieldValues: GraphConnection<ProjectFieldResponse> }) | null }>(
+    query, { item: itemId, project: projectId, first, after });
+  if (project?.id !== projectId) return missing();
   if (!node || node.id !== itemId || node.project.id !== projectId) {
     throw new Error("Project item does not belong to the connected project.");
   }

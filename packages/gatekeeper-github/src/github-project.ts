@@ -56,6 +56,8 @@ export class GitHubProjectGatekeeper extends DurableObject<Env, GitHubProjectPro
     return this.#identity;
   }
 
+  async projectId(): Promise<string> { return this.#id(); }
+
   async metadata(): Promise<GitHubProjectMetadata> {
     const id = await this.#id();
     return this.#read(api => projectMetadata(api, id));
@@ -76,22 +78,22 @@ export class GitHubProjectGatekeeper extends DurableObject<Env, GitHubProjectPro
   }
 
   async fields(first: number, after?: string) {
-    const { id } = await this.metadata();
+    const id = await this.#id();
     return this.#read(api => projectFields(api, id, first, after));
   }
 
   async items(first: number, after?: string) {
-    const { id } = await this.metadata();
+    const id = await this.#id();
     return this.#read(api => projectItems(api, id, first, after));
   }
 
   async item(itemId: string) {
-    const { id } = await this.metadata();
+    const id = await this.#id();
     return this.#read(api => projectItem(api, id, itemId));
   }
 
   async itemFields(itemId: string, first: number, after?: string) {
-    const { id } = await this.metadata();
+    const id = await this.#id();
     return this.#read(api => projectItemFields(api, id, itemId, first, after));
   }
 
@@ -123,10 +125,10 @@ export class GitHubProjectSession extends RpcTarget implements GitHubProject {
   [Symbol.dispose](): void { this.queue[Symbol.dispose](); }
 
   async #observe(title: string, entries: GitHubProjectEntry[] = [], queue = this.queue): Promise<void> {
-    const project = await this.gatekeeper.metadata();
+    const projectId = await this.gatekeeper.projectId();
     const description: ObservationDescription & { subresources: string[] } = {
       title, description: title, subresources: [
-        formatSubresourceId({ fragments: [{ name: "project", id: project.id }] }),
+        formatSubresourceId({ fragments: [{ name: "project", id: projectId }] }),
         ...projectEntrySubresources(entries),
       ],
     };
