@@ -30,7 +30,7 @@ import type { SpawnCallableOptions } from "./agent-spawner-binding";
 import { traceRejectedToolCall, traceTool } from "./agent-tracing";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
 import type { CachedRequest, ModelHandle } from "./ai-models";
-import { blobOid } from "./git-store";
+import { assertNoNul, blobOid } from "./git-store";
 import type {
   AiChatAgentContext, ChatBindingEntry, CompactionCheckpoint, StoredAssistantMessage,
   StoredChatMessage, StoredToolCall,
@@ -1304,7 +1304,7 @@ ${EXECUTE_CODE_SELF_PARAM}
 `.trim();
 
 let LIST_CONNECTABLE_RESOURCES_TOOL_DESCRIPTION = `
-List the resource types a gatekeeper vendor offers, so you can construct a resourceUrl for requestConnection. The system prompt lists which vendors exist; call this to learn a specific vendor's resource URL patterns before requesting a connection.
+List a gatekeeper vendor's separate Existing resources and New resources. Use an Existing resource's URL pattern with requestConnection to connect something already present; use a New resource's resourceUrlPattern with createExternalResource to create something. A vendor may offer either or both. The system prompt lists which vendors exist; call this to discover their resource types.
 `.trim();
 
 let REQUEST_CONNECTION_TOOL_DESCRIPTION = `
@@ -1314,7 +1314,7 @@ For a Gadget that needs AI agents of its own, rather than calling back into this
 `.trim();
 
 let CREATE_EXTERNAL_RESOURCE_TOOL_DESCRIPTION = `
-Create a new external resource (e.g. a new document), for resource types listConnectableResources marks creatable; requestConnection is for resources that already exist. The resource is immediately available as \`env.<bindingName>\` and your turn continues. It is created at the provider, in an account the user chooses, only once they approve the creation; until then it is simulated, and changes you make to it apply after the creation.
+Create a new external resource (e.g. a new document), from the New resources section of listConnectableResources; requestConnection is only for the separately listed Existing resources. The resource is immediately available as \`env.<bindingName>\` and your turn continues. It is created at the provider, in an account the user chooses, only once they approve the creation; until then it is simulated, and changes you make to it apply after the creation.
 `.trim();
 
 // =======================================================================================
@@ -2945,6 +2945,8 @@ async function runAgentPass(
       });
       throw error;
     }
+    // Text that won't read back from Git is a model mistake the tool error lets it correct.
+    for (let [path, file] of Object.values(change).flat()) assertNoNul(path, file);
     // Bound the step's total: the barrier writes the buffer as exactly one "changes" message,
     // which must fit in one storage record, or the step's edits would be lost. Composition never
     // exceeds the sum of its inputs' sizes, so the summed size bounds the message's change.
