@@ -66,6 +66,8 @@ describe("auto-approval", () => {
       { ...base(), type: "createPullRequest", provisionalId: "~2", options: { title: "Fix", head: "feature", base: "main" } },
       { ...entity(), type: "setTitle", title: "New", previousTitle: "Old" },
       { ...entity(), type: "setBody", bodyMarkdown: "New", previousBodyMarkdown: "Old" },
+      { ...entity(), type: "setMilestone", milestone: null, previousMilestone: 1 },
+      { ...entity(), type: "setAssignees", assignees: ["ada"], previousAssignees: [] },
       { ...entity(), type: "addLabels", labels: ["bug"], previousLabels: [] },
       { ...entity(), type: "removeLabels", labels: ["bug"], previousLabels: ["bug"] },
       { ...entity(), type: "changeState", state: "closed", reason: "completed", previousState: "open" },
@@ -81,6 +83,8 @@ describe("auto-approval", () => {
       ["github.createPullRequest", true],
       ["github.setTitle", true],
       ["github.setBody", true],
+      ["github.setMilestone", true],
+      ["github.setAssignees", true],
       ["github.addLabels", true],
       ["github.removeLabels", true],
       ["github.changeState", true],
@@ -103,7 +107,7 @@ describe("auto-approval", () => {
   });
 
   it("advertises, per binding, exactly the eligible kinds its actions can carry, and never a merge", async () => {
-    const issue = ["setTitle", "setBody", "addLabels", "removeLabels", "changeState", "postComment"]
+    const issue = ["setTitle", "setBody", "setMilestone", "setAssignees", "addLabels", "removeLabels", "changeState", "postComment"]
       .map(type => `github.${type}`);
     const pull = [...issue, "github.postReview", "github.replyToDiffComment"];
     expect(await gatekeeper("issue").advertised()).toEqual(issue);

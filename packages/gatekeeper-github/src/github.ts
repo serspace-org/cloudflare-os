@@ -345,6 +345,18 @@ type RemoveLabelsAction = BaseEntityAction & {
   previousLabels: string[];
 };
 
+type SetMilestoneAction = BaseEntityAction & {
+  type: "setMilestone";
+  milestone: GitHubMilestone | null;
+  previousMilestone: number | null;
+};
+
+type SetAssigneesAction = BaseEntityAction & {
+  type: "setAssignees";
+  assignees: string[];
+  previousAssignees: string[];
+};
+
 type ChangeStateAction = BaseEntityAction & {
   type: "changeState";
   state: GitHubIssueState;
@@ -417,6 +429,8 @@ type GitHubAction =
   | AddLabelsAction
   | RemoveLabelsAction
   | ChangeStateAction
+  | SetMilestoneAction
+  | SetAssigneesAction
   | PostCommentAction
   | PostReviewAction
   | ReplyToDiffCommentAction
@@ -484,6 +498,16 @@ function describeGitHubAction(action: GitHubAction): RenderedDescription {
       return noteReferenceRewrite(
         buildDescription(`Replace the Markdown body of #${action.targetId}.`)
           .verbatim("New body", action.bodyMarkdown, "markdown"), action.bodyMarkdown)
+        .finish();
+    case "setMilestone":
+      return buildDescription(`Replace the milestone of #${action.targetId}.`)
+        .inline("Previous milestone", action.previousMilestone === null ? "None" : String(action.previousMilestone))
+        .inline("New milestone", action.milestone ? `#${action.milestone.number}: ${action.milestone.title}` : "None")
+        .finish();
+    case "setAssignees":
+      return buildDescription(`Replace all assignees of #${action.targetId} with the following set.`)
+        .list("Previous assignees", action.previousAssignees)
+        .list("New assignees (empty clears all)", action.assignees)
         .finish();
     case "addLabels":
       return buildDescription(`Add labels to #${action.targetId}.`)
@@ -573,6 +597,8 @@ const ACTION_KINDS = {
   createPullRequest: { tag: "github.createPullRequest", label: "Create pull requests" },
   setTitle: { tag: "github.setTitle", label: "Rename issues and pull requests" },
   setBody: { tag: "github.setBody", label: "Edit issue and pull request bodies" },
+  setMilestone: { tag: "github.setMilestone", label: "Assign or remove milestones" },
+  setAssignees: { tag: "github.setAssignees", label: "Replace assignees" },
   addLabels: { tag: "github.addLabels", label: "Add labels" },
   removeLabels: { tag: "github.removeLabels", label: "Remove labels" },
   changeState: { tag: "github.changeState", label: "Close and reopen issues and pull requests" },
@@ -589,7 +615,7 @@ type AutoApprovalKind = keyof typeof ACTION_KINDS;
 // The auto-approvable kinds each binding's session can submit, so a pre-approval UI lists only
 // those its actions can carry. Merges never appear: they are never auto-approvable.
 const ISSUE_ACTIONS: AutoApprovalKind[] =
-  ["setTitle", "setBody", "addLabels", "removeLabels", "changeState", "postComment"];
+  ["setTitle", "setBody", "setMilestone", "setAssignees", "addLabels", "removeLabels", "changeState", "postComment"];
 const PULL_ACTIONS: AutoApprovalKind[] = [...ISSUE_ACTIONS, "postReview", "replyToDiffComment"];
 const BINDING_ACTIONS: Record<ResourceKind, AutoApprovalKind[]> = {
   repo: ["createIssue", "createPullRequest", ...PULL_ACTIONS, "push", "forcePush"],
@@ -1008,6 +1034,12 @@ function validateMilestoneFilter(filter?: GitHubIssueFilter): void {
       (!Number.isSafeInteger(filter.milestone) || filter.milestone < 1)) {
     throw new Error("Milestone number must be a positive integer.");
   }
+}
+
+function sameAssignees(left: string[], right: string[]): boolean {
+  const leftSet = new Set(left.map(login => login.toLowerCase()));
+  const rightSet = new Set(right.map(login => login.toLowerCase()));
+  return leftSet.size === rightSet.size && [...leftSet].every(login => rightSet.has(login));
 }
 
 function sameLogin(login: string | undefined, wanted: string): boolean {
@@ -2565,6 +2597,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         return action.provisionalId === provisionalId;
       case "setTitle":
       case "setBody":
+      case "setMilestone":
+      case "setAssignees":
       case "addLabels":
       case "removeLabels":
       case "changeState":
@@ -2749,6 +2783,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       switch (action.type) {
         case "setTitle":
         case "setBody":
+        case "setMilestone":
+        case "setAssignees":
         case "addLabels":
         case "removeLabels":
         case "changeState":
@@ -3144,6 +3180,14 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
             result.bodyMarkdown = this.#rewriteKnownReferences(action.bodyMarkdown, false);
             result.updatedAt = new Date(action.submittedAt);
           }
+          break;
+        case "setMilestone":
+          result.milestone = action.milestone;
+          result.updatedAt = new Date(action.submittedAt);
+          break;
+        case "setAssignees":
+          result.assignees = action.assignees.map(actorFromLogin);
+          result.updatedAt = new Date(action.submittedAt);
           break;
         case "addLabels": {
           const existing = new Set(result.labels.map(label => label.name.toLowerCase()));
@@ -4223,6 +4267,14 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "setMilestone":
+      case "setAssignees": {
+        const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
+        if (!realId) throw new Error(`Target ${action.targetId} has not been created on GitHub yet.`);
+        await this.#writeAssignment(action, Number(realId), false);
+        this.#markActionApproved(action);
+        return;
+      }
       case "addLabels": {
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
         if (!realId) throw new Error(`Target ${action.targetId} has not been created on GitHub yet.`);
@@ -4528,6 +4580,13 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "setMilestone":
+      case "setAssignees": {
+        const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
+        if (!realId) return { message: "The target resource no longer exists on GitHub.", canRetry: false };
+        await this.#writeAssignment(action, Number(realId), true);
+        return;
+      }
       case "addLabels":
       case "removeLabels": {
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
@@ -4602,6 +4661,28 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           canRetry: false,
         };
     }
+  }
+
+  /** Verify PATCH results: GitHub may return 200 while silently ignoring assignment changes. */
+  async #writeAssignment(action: SetMilestoneAction | SetAssigneesAction, realId: number, revert: boolean): Promise<void> {
+    const milestone = action.type === "setMilestone" ? (revert ? action.previousMilestone : action.milestone?.number ?? null) : null;
+    const assignees = action.type === "setAssignees" ? (revert ? action.previousAssignees : action.assignees) : [];
+    const result = await this.#withApi(api => api.updateIssue(action.owner, action.repo, realId,
+      action.type === "setMilestone" ? { milestone } : { assignees }));
+    this.#clearCaches();
+    const applied = action.type === "setMilestone" ? (result.milestone?.number ?? null) === milestone :
+      sameAssignees((result.assignees ?? []).map(user => user.login), assignees);
+    if (!applied) throw new Error("GitHub did not apply the requested assignment. Check repository write access and assignee eligibility.");
+  }
+
+  async listAssignees(pageSize: number, queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubActor>> {
+    const ownedQueue = queue.dup();
+    return new PlanningCursor(async after => {
+      const page = Number(after ?? "1");
+      const users = await this.#readApi(api => api.listAssignees(this.ctx.props.owner, this.ctx.props.repo, page, pageSize));
+      await ownedQueue.authorizeObservation({ title: "List GitHub assignees", description: "Read assignable users in the connected repository." });
+      return { items: actorsFromUsers(users), next: users.length === pageSize ? String(page + 1) : undefined };
+    }, () => ownedQueue[Symbol.dispose]());
   }
 
   async getMilestone(number: number): Promise<GitHubMilestone> {
@@ -6081,6 +6162,28 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     };
   }
 
+  async prepareSetMilestone(targetKind: EntityKind, targetId: string, number: number | null): Promise<SetMilestoneAction> {
+    if (number !== null && (!Number.isSafeInteger(number) || number < 1)) throw new Error("Milestone number must be a positive integer.");
+    const details = targetKind === "issue" ? await this.#getIssueDetails(targetId) : await this.#getPullRequestDetails(targetId);
+    const milestone = number === null ? null : await this.getMilestone(number);
+    return { type: "setMilestone", approvalId: this.#nextActionId(), submittedAt: Date.now(),
+      owner: this.ctx.props.owner, repo: this.ctx.props.repo, targetKind, targetId,
+      milestone, previousMilestone: details.milestone?.number ?? null };
+  }
+
+  async prepareSetAssignees(targetKind: EntityKind, targetId: string, logins: string[]): Promise<SetAssigneesAction> {
+    if (logins.some(login => !/^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$/.test(login))) {
+      throw new Error("Assignees must be GitHub logins, without @ prefixes or whitespace.");
+    }
+    const assignees = [...new Map(logins.map(login => [login.toLowerCase(), login])).values()];
+    if (assignees.length > 10) throw new Error("At most 10 assignees can be assigned.");
+    const details = targetKind === "issue" ? await this.#getIssueDetails(targetId) : await this.#getPullRequestDetails(targetId);
+    for (const login of assignees) await this.#readApi(api => api.checkAssignee(this.ctx.props.owner, this.ctx.props.repo, login));
+    return { type: "setAssignees", approvalId: this.#nextActionId(), submittedAt: Date.now(),
+      owner: this.ctx.props.owner, repo: this.ctx.props.repo, targetKind, targetId,
+      assignees, previousAssignees: details.assignees.map(actor => actor.login) };
+  }
+
   async prepareAddLabels(targetKind: EntityKind, targetId: string, labels: string[]): Promise<AddLabelsAction> {
     const details = targetKind === "issue" ? await this.#getIssueDetails(targetId) : await this.#getPullRequestDetails(targetId);
     return {
@@ -6356,6 +6459,10 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     return this.#gatekeeper.listMilestones(options ?? {}, pageSizeOf(options), this.#approvalQueue);
   }
 
+  async listAssignees(options?: GitHubPageOptions): Promise<Cursor<GitHubActor>> {
+    return this.#gatekeeper.listAssignees(pageSizeOf(options), this.#approvalQueue);
+  }
+
   async getMilestone(number: number): Promise<GitHubMilestone> {
     const milestone = await this.#gatekeeper.getMilestone(number);
     await this.#approvalQueue.authorizeObservation({ title: `Read GitHub milestone #${number}`, description: "Read a milestone in the connected repository." });
@@ -6622,6 +6729,20 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
     await this.gatekeeper.submitActionForApproval(this.approvalQueue, action, {
       title: `Edit body of #${this.logicalId}`,
       implementsRevert: true,
+    });
+  }
+
+  async setMilestone(number: number | null): Promise<void> {
+    const action = await this.gatekeeper.prepareSetMilestone(this.kind, this.logicalId, number);
+    await this.gatekeeper.submitActionForApproval(this.approvalQueue, action, {
+      title: `Set milestone for #${this.logicalId}`, implementsRevert: true,
+    });
+  }
+
+  async setAssignees(logins: string[]): Promise<void> {
+    const action = await this.gatekeeper.prepareSetAssignees(this.kind, this.logicalId, logins);
+    await this.gatekeeper.submitActionForApproval(this.approvalQueue, action, {
+      title: `Set assignees for #${this.logicalId}`, implementsRevert: true,
     });
   }
 

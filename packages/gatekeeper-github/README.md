@@ -51,7 +51,7 @@ and iteration values. Built-in labels, assignees, milestone, and repository fiel
 the corresponding issue/PR details. Other field types are explicitly tagged `unsupported`, rather
 than silently omitted. Unset values are absent. Project reads only expose the connected issue or
 PR's memberships and fields; they do not grant access to other project items or draft issues.
-This API is read-only: it does not change milestones, project membership, or field values.
+Project membership and field values remain read-only.
 
 Existing OAuth connections must **reconnect** to grant `read:project` before reading projects.
 Ordinary issue, PR, and milestone reads do not require that scope. With a GitHub App, grant the
@@ -64,6 +64,28 @@ Sharing verifies project access separately from repository access. Each newly re
 tracked durably, including reads still awaiting authorization; existing observers are checked
 before disclosure, and new observers must be able to read every tracked project. Project pages
 are read fresh rather than cached, and every page is authorized before the cursor advances.
+
+## Assigning milestones and assignees
+
+Issue and PR bindings expose `setMilestone(number | null)` and `setAssignees(logins)`.
+Milestones use their repository-local numbers; `null` clears the milestone. Assignees are GitHub
+logins without `@`, and replace the full set; `[]` clears everyone. Repository bindings expose
+`listAssignees()` to discover eligible users, alongside `listMilestones()`.
+
+```ts
+using issue = await env.GITHUB_REPO.getIssue("42");
+await issue.setMilestone(3);
+await issue.setAssignees(["octocat"]);
+```
+
+Assignment changes use the existing action approval flow, support undo, and appear in simulated
+issue/PR details and filters while pending. They also work on provisional issues before creation
+is approved; apply waits for the real GitHub number. The separate action kinds are
+`github.setMilestone` and `github.setAssignees`. Whole-project bindings remain read-only.
+
+GitHub requires repository write access for these changes. The connector validates the selected
+milestone and assignee eligibility before staging, and verifies GitHub's PATCH response so a
+silently ignored change is reported as an error rather than success.
 
 ## Whole-project connections
 

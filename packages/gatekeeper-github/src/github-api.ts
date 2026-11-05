@@ -1184,6 +1184,19 @@ export class GitHubApi {
     )).data;
   }
 
+  /** One bounded page of repository users eligible for issue/PR assignment. */
+  async listAssignees(owner: string, repo: string, page: number, perPage: number): Promise<GitHubSimpleUser[]> {
+    return (await this.#request<GitHubSimpleUser[]>("GET",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/assignees`,
+      { query: { page, per_page: perPage } })).data;
+  }
+
+  /** Reject ineligible users before staging an assignment GitHub would silently ignore. */
+  async checkAssignee(owner: string, repo: string, login: string): Promise<void> {
+    await this.#request<void>("GET",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/assignees/${encodeURIComponent(login)}`);
+  }
+
   async updateIssue(
     owner: string,
     repo: string,
@@ -1193,6 +1206,8 @@ export class GitHubApi {
       body?: string;
       state?: "open" | "closed";
       state_reason?: "completed" | "not_planned" | null;
+      milestone?: number | null;
+      assignees?: string[];
     },
   ): Promise<GitHubIssueResponse> {
     return (await this.#request<GitHubIssueResponse>(
