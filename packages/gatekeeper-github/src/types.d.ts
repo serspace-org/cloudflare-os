@@ -893,6 +893,8 @@ export type GitHubPageOptions = {
 
 /** Filters for listing issues. */
 export type GitHubIssueFilter = GitHubPageOptions & {
+  /** Milestone number, "none" for unassigned issues, or "*" for any assigned milestone. */
+  milestone?: number | "none" | "*";
   state?: GitHubIssueState | "all";
   labels?: string[];
   author?: string;

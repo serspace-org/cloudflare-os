@@ -234,7 +234,45 @@ describe("pull request text search", () => {
   });
 });
 
+const milestone = (number: number) => ({
+  number, title: `Milestone ${number}`, description: null,
+  html_url: `https://github.com/acme/widgets/milestone/${number}`, state: "open",
+  open_issues: 2, closed_issues: 0, created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z", due_on: null, closed_at: null,
+});
+
 describe("filters", () => {
+  it.each([3, "none", "*"] as const)("filters issue listings and searches by milestone %s", async filter => {
+    const github = new FakeGitHub();
+    const rows = [issue(1, { milestone: milestone(3) }), issue(2), issue(3, { milestone: milestone(4) })];
+    github.pages.set("/issues", [rows]);
+    github.pages.set("/search/issues", [rows]);
+    const gk = await repoGatekeeper();
+    const expected = filter === 3 ? ["1"] : filter === "none" ? ["2"] : ["1", "3"];
+    for (const method of ["listIssues", "searchIssues"] as const) {
+      const results = await gk.all<{ id: string }>(method, { text: "", milestone: filter, state: "all" });
+      expect(results.map(row => row.id)).toEqual(expected);
+    }
+  });
+
+  it("keeps a touched issue's milestone when simulating an edit", async () => {
+    const github = new FakeGitHub();
+    github.issues.set(1, issue(1, { milestone: milestone(3) }));
+    github.pages.set("/issues", [[issue(1, { milestone: milestone(3) })]]);
+    const gk = await repoGatekeeper();
+    await gk.queueEdit("issue", "1", { title: "Renamed" });
+    expect(await gk.all("listIssues", { milestone: 3 })).toMatchObject([{ id: "1", title: "Renamed" }]);
+    expect(await gk.all("listIssues", { milestone: "none" })).toEqual([]);
+  });
+
+  it("rejects invalid milestone numbers", async () => {
+    const github = new FakeGitHub();
+    const gk = await repoGatekeeper();
+    await expect(gk.all("listIssues", { milestone: 0 })).rejects.toThrow("positive integer");
+    await expect(gk.all("searchIssues", { text: "", milestone: -1 })).rejects.toThrow("positive integer");
+    expect(github.requests).toEqual([]);
+  });
+
   it("matches a creator login case-insensitively", async () => {
     const github = new FakeGitHub();
     github.pages.set("/issues", [[

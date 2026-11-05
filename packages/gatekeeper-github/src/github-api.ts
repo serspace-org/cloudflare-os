@@ -688,9 +688,16 @@ export class GitHubApi {
   }
 
   /** GraphQL can return HTTP 200 with partial data and errors: never serve that as complete. */
-  async #graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-    const { data: result } = await this.#request<{ data?: T; errors?: { type?: string }[] }>(
-      "POST", "/graphql", { body: { query, variables } });
+  async planningGraphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const response = await this.#request<{ data?: T; errors?: { type?: string }[] }>(
+      "POST", "/graphql", { body: { query, variables } }).catch(error => {
+      if (error instanceof GitHubApiError && error.status === 403 && !error.rateLimited) {
+        throw new GitHubApiError(403,
+          "GitHub project access was denied. Reconnect GitHub with project read permission and check project access.");
+      }
+      throw error;
+    });
+    const result = response.data;
     if (result.errors?.length || !result.data) {
       const denied = result.errors?.length && result.errors.every(error =>
         ["FORBIDDEN", "NOT_FOUND", "INSUFFICIENT_SCOPES"].includes(error.type ?? ""));
@@ -725,7 +732,7 @@ export class GitHubApi {
     if (!repository.node_id || repository.id !== this.#repo.id) {
       throw new Error("GitHub did not return the connected repository identity.");
     }
-    const result = await this.#graphql<IssueProjectsResponse>(ISSUE_PROJECTS_QUERY,
+    const result = await this.planningGraphql<IssueProjectsResponse>(ISSUE_PROJECTS_QUERY,
       { repo: repository.node_id, number, first, after });
     const issue = result.node?.issueOrPullRequest;
     if (!issue || issue.__typename !== (kind === "issue" ? "Issue" : "PullRequest")) {
@@ -737,7 +744,7 @@ export class GitHubApi {
   async listIssueProjectFields(number: number, kind: "issue" | "pull", item: string,
     first: number, after?: string): Promise<PlanningPage<GitHubProjectFieldValue> & { projectId: string }> {
     if (!this.#repo) throw new Error("Cannot read projects without a verified repository identity.");
-    const { node } = await this.#graphql<ProjectFieldsResponse>(PROJECT_FIELDS_QUERY, { item, first, after });
+    const { node } = await this.planningGraphql<ProjectFieldsResponse>(PROJECT_FIELDS_QUERY, { item, first, after });
     const content = node?.content;
     if (!node || !content || content.__typename !== (kind === "issue" ? "Issue" : "PullRequest") ||
         content.number !== number || content.repository?.databaseId !== this.#repo.id) {
@@ -750,7 +757,7 @@ export class GitHubApi {
   /** Probe one project's ACL using this API's account, without disclosing its metadata. */
   async hasProjectAccess(id: string): Promise<boolean> {
     try {
-      const { node } = await this.#graphql<{ node: { id?: string } | null }>(
+      const { node } = await this.planningGraphql<{ node: { id?: string } | null }>(
         "query ProjectAccess($id: ID!) { node(id: $id) { ... on ProjectV2 { id } } }", { id });
       return node?.id === id;
     } catch (error) {
@@ -1007,6 +1014,7 @@ export class GitHubApi {
       labels?: string;
       creator?: string;
       assignee?: string;
+      milestone?: number | "none" | "*";
       sort?: string;
       direction?: string;
       per_page: number;
@@ -1028,6 +1036,7 @@ export class GitHubApi {
       labels?: string;
       creator?: string;
       assignee?: string;
+      milestone?: number | "none" | "*";
       sort?: string;
       direction?: string;
       per_page: number;

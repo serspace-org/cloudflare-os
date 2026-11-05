@@ -37,6 +37,10 @@ import type {
   GitHubSubscribeOptions,
 } from "../../src/types.js";
 
+import { GitHubProjectGatekeeper, type GitHubProjectProps } from "../../src/github-project";
+import type { GitHubProject } from "../../src/project-types";
+export { GitHubProjectGatekeeper };
+
 export { default } from "../../src/github.js";
 export * from "../../src/github.js";
 // Named as well, since the pool builds `ctx.exports` entrypoints only from exports it can see
@@ -272,6 +276,44 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     const verifier = (this.ctx.exports as unknown as TestExports)
       .GitHubVerifier({ props: { userObjectId } });
     return await outcome(() => verifier.hasRepoAccess(owner, repo));
+  }
+
+  /** Drive the separate project binding through its real session and authorization queue. */
+  async projectRead(props: GitHubProjectProps, method: "metadata" | "fields" | "items" | "item" | "values",
+    options: { itemId?: string; calls?: number; deny?: number; isArchived?: boolean; kind?: "draftIssue"; disposeSession?: boolean } = {}): Promise<Outcome<string>> {
+    return outcome(async () => {
+      const facet = this.ctx.facets.get("project", () => ({ class: this.ctx.exports.GitHubProjectGatekeeper({ props }) }));
+      const queue = new PlanningQueue(options.deny ?? 0);
+      using queueStub = new RpcStub(queue);
+      using session = await facet.startSession(queueStub as never) as GitHubProject & Disposable;
+      if (method === "metadata" || method === "item") {
+        const value = await (method === "metadata" ? session.getMetadata() : session.getItem(options.itemId ?? "item"));
+        return JSON.stringify({ value, observations: queue.observations });
+      }
+      using cursor = await (method === "fields" ? session.listFields({ resultsPerPage: 1 }) :
+        method === "items" ? session.listItems({ resultsPerPage: 1, isArchived: options.isArchived, kind: options.kind }) :
+        session.listItemFields(options.itemId ?? "item", { resultsPerPage: 1 })) as Cursor<unknown> & Disposable;
+      if (options.disposeSession) session[Symbol.dispose]();
+      const pages = [];
+      for (let i = 0; i < (options.calls ?? 5); i++) {
+        try {
+          const page = await cursor.next();
+          pages.push(page);
+          if (page === null) break;
+        } catch (error) { pages.push({ error: String(error) }); }
+      }
+      return JSON.stringify({ pages, observations: queue.observations });
+    });
+  }
+
+  async projectObserver(props: GitHubProjectProps, userObjectId: string, subresources?: string[]): Promise<Outcome<string>> {
+    return outcome(async () => {
+      const facet = this.ctx.facets.get("project", () => ({ class: this.ctx.exports.GitHubProjectGatekeeper({ props }) }));
+      const verifier = this.ctx.exports.GitHubVerifier({ props: { userObjectId } });
+      await facet.addObserver("observer", verifier);
+      const result = subresources ? await facet.verifyObserverAccess([{ id: "observer", verifier }], subresources) : { allowedObserverIds: ["observer"] };
+      return JSON.stringify(result);
+    });
   }
 
   /** Drive project/milestone reads through the actual session and its observation queue. */

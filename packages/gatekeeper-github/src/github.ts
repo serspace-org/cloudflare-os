@@ -200,6 +200,13 @@ import type {
   GitHubWorkflowRunSummary,
 } from "./types";
 import TYPES_CODE from "./types.txt";
+import PROJECT_TYPES_CODE from "./project-types.txt";
+import { GitHubProjectGatekeeper } from "./github-project";
+import { parseProjectUrl } from "./github-project-api";
+import { GitHubProjectConfiguratorUI } from "./github-project-configurator";
+import GITHUB_PROJECT_CONFIGURATOR_HTML from "./generated/github-project-configurator-ui.txt";
+export { GitHubProjectGatekeeper };
+
 import {
   GitHubIssueConfiguratorUI,
   GitHubPullRequestConfiguratorUI,
@@ -676,7 +683,21 @@ const PULL_REQUEST_RESOURCE: SupportedResource = {
   description: "Read and manage a specific GitHub pull request and its review threads.",
 };
 
+const ORG_PROJECT_RESOURCE: SupportedResource = {
+  urlPattern: "https://github.com/orgs/:owner/projects/:number",
+  title: "GitHub Project",
+  description: "Read one GitHub Project, its fields, draft items, and linked issues and pull requests.",
+};
+const USER_PROJECT_RESOURCE: SupportedResource = {
+  urlPattern: "https://github.com/users/:owner/projects/:number",
+  title: "GitHub User Project",
+  description: "Read one user-owned GitHub Project.",
+  groupedWith: ORG_PROJECT_RESOURCE.urlPattern,
+};
+
 const SUPPORTED_RESOURCES: SupportedResource[] = [
+  ORG_PROJECT_RESOURCE,
+  USER_PROJECT_RESOURCE,
   REPO_RESOURCE,
   ISSUE_RESOURCE,
   PULL_REQUEST_RESOURCE,
@@ -982,6 +1003,13 @@ function matchesAllLabels(item: { labels: GitHubLabel[] }, labels?: string[]): b
 }
 
 /** GitHub matches logins case-insensitively. */
+function validateMilestoneFilter(filter?: GitHubIssueFilter): void {
+  if (typeof filter?.milestone === "number" &&
+      (!Number.isSafeInteger(filter.milestone) || filter.milestone < 1)) {
+    throw new Error("Milestone number must be a positive integer.");
+  }
+}
+
 function sameLogin(login: string | undefined, wanted: string): boolean {
   return login?.toLowerCase() === wanted.toLowerCase();
 }
@@ -989,10 +1017,13 @@ function sameLogin(login: string | undefined, wanted: string): boolean {
 /** The structured predicates issue and pull request searches share with the issue listing. */
 function issueMatchesFilter(
   item: GitHubIssueSummary | GitHubPullRequestSummary,
-  filter?: Pick<GitHubIssueFilter, "state" | "labels" | "author" | "assignee">,
+  filter?: Pick<GitHubIssueFilter, "state" | "labels" | "author" | "assignee" | "milestone">,
 ): boolean {
   if (!filter) return true;
-  const { state, labels, author, assignee } = filter;
+  const { state, labels, author, assignee, milestone } = filter;
+  if (milestone === "none" && item.milestone) return false;
+  if (milestone === "*" && !item.milestone) return false;
+  if (typeof milestone === "number" && item.milestone?.number !== milestone) return false;
   if (state && state !== "all" && item.state !== state) return false;
   if (!matchesAllLabels(item, labels)) return false;
   if (author && !sameLogin(item.author?.login, author)) return false;
@@ -1447,7 +1478,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return TYPES_CODE;
+    return TYPES_CODE + "\n" + PROJECT_TYPES_CODE;
   }
 }
 
@@ -1713,6 +1744,17 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       throw new Error(`Unsupported GitHub URL: ${url}`);
     }
 
+    const project = parseProjectUrl(url);
+    if (project) {
+      return {
+        class: this.ctx.exports.GitHubProjectGatekeeper({ props: { ...project, userObjectId: this.ctx.props.userObjectId } }),
+        resource: project.ownerType === "organization" ? ORG_PROJECT_RESOURCE : USER_PROJECT_RESOURCE,
+      };
+    }
+    if (segments[2] === "projects") {
+      throw new Error(`Unsupported GitHub project URL: ${url}`);
+    }
+
     const [owner, repo, kind, number] = segments;
     const props: GitHubGatekeeperImplProps = {
       userObjectId: this.ctx.props.userObjectId,
@@ -1742,6 +1784,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     resourceUrlPattern: string,
   ): Promise<ResourceConfiguratorFrame> {
     const read = accountReader(this.ctx.exports, this.ctx.props.userObjectId);
+
+    if (resourceUrlPattern === ORG_PROJECT_RESOURCE.urlPattern || resourceUrlPattern === USER_PROJECT_RESOURCE.urlPattern) {
+      return { iframeHtml: GITHUB_PROJECT_CONFIGURATOR_HTML, ui: new RpcStub(new GitHubProjectConfiguratorUI(read)) };
+    }
 
     if (resourceUrlPattern === REPO_RESOURCE.urlPattern) {
       return {
@@ -1845,11 +1891,22 @@ type GitHubVerifierProps = {
 export interface GitHubVerifierApi extends GatekeeperUserVerifier {
   hasRepoAccess(owner: string, repo: string): Promise<boolean>;
   hasProjectAccess(id: string): Promise<boolean>;
+  hasRepoIdAccess(id: number): Promise<boolean>;
 }
 
 @validateRpc()
 export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
     implements GitHubVerifierApi {
+  async hasRepoIdAccess(id: number): Promise<boolean> {
+    try {
+      const result = await accountReader(this.ctx.exports, this.ctx.props.userObjectId)(api => api.getRepoByIdConditional(id));
+      return result.status === 200 && result.data.id === id;
+    } catch (error) {
+      if (error instanceof GitHubApiError && !error.rateLimited && (error.status === 403 || error.status === 404)) return false;
+      throw error;
+    }
+  }
+
   async hasProjectAccess(id: string): Promise<boolean> {
     return accountReader(this.ctx.exports, this.ctx.props.userObjectId)(api => api.hasProjectAccess(id));
   }
@@ -2905,7 +2962,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #getRemoteIssueDetails(realId: string): Promise<GitHubIssueDetails> {
-    const key = this.#cacheKey("issue", realId);
+    // v2: milestone joined the details; old ETags cannot migrate normalized cache entries.
+    const key = this.#cacheKey("issue-v2", realId);
     const details = await this.#loadCachedWithEtag<GitHubIssueDetails>(key, ENTITY_CACHE_TTL_MS, async etag => {
       const result = await this.#withApi(api =>
         api.getIssueConditional(this.ctx.props.owner, this.ctx.props.repo, Number(realId), { ifNoneMatch: etag })
@@ -2928,8 +2986,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #getRemotePullRequestDetails(realId: string, ttlMs = ENTITY_CACHE_TTL_MS): Promise<GitHubPullRequestDetails> {
-    // v2: the details gained `mergeState`, and etag revalidation can keep an old-shaped entry alive.
-    const key = this.#cacheKey("pull-v2", realId);
+    // v3: milestone joined the details; a 304 must not preserve the older normalized shape.
+    const key = this.#cacheKey("pull-v3", realId);
     const details = await this.#loadCachedWithEtag<GitHubPullRequestDetails>(
       key,
       ttlMs,
@@ -3160,6 +3218,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #listIssueSummaries(filter: GitHubIssueFilter | undefined, pageSize: number): Promise<Cursor<GitHubIssueSummary>> {
+    validateMilestoneFilter(filter);
     const compare = issueComparator(filter?.sort, filter?.direction);
     const touched = await this.#buildTouchedIssueSummaries(item => issueMatchesFilter(item, filter), compare);
 
@@ -3173,15 +3232,16 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
     // Pull request rows stay as null placeholders so a page keeps its upstream length, which is
-    // what ends the walk. "-v2": the previous entries held filtered (short) pages.
+    // what ends the walk. v3 also invalidates normalized pages that predate milestone fields.
     return new StreamingCursor<GitHubIssueSummary, GitHubIssueSummary | null>({
       fetchPage: async (page, perPage) => {
-        const cacheKey = this.#cacheKey("list-issues-v2", stableKey(filter ?? {}), `p${page}`);
+        const cacheKey = this.#cacheKey("list-issues-v3", stableKey(filter ?? {}), `p${page}`);
         return await this.#loadCachedWithEtag<(GitHubIssueSummary | null)[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.listIssuesConditional(owner, repo, {
             state: filter?.state,
             labels: filter?.labels?.join(","),
             creator: filter?.author,
+            milestone: filter?.milestone,
             assignee: filter?.assignee,
             sort: filter?.sort,
             direction: filter?.direction,
@@ -3211,6 +3271,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #searchIssueSummaries(query: GitHubIssueSearch, pageSize: number): Promise<Cursor<GitHubIssueSummary>> {
+    validateMilestoneFilter(query);
     const remoteSort = query.sort ?? "created";
     const remoteDirection = query.direction ?? "desc";
     const compare = issueComparator(remoteSort, remoteDirection);
@@ -3236,7 +3297,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     };
     return new StreamingCursor<GitHubIssueSummary>({
       fetchPage: async (page, perPage) => {
-        const cacheKey = this.#cacheKey("search-issues-scoped-v1", stableKey(query), `p${page}`);
+        const cacheKey = this.#cacheKey("search-issues-scoped-v2", stableKey(query), `p${page}`);
         const results = await this.#loadCachedWithEtag<CachedIssueSearchResult[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api =>
             api.searchIssuesConditional(searchQuery, page, perPage, remoteSort, remoteDirection, { ifNoneMatch: etag })
@@ -3291,8 +3352,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const repo = this.ctx.props.repo;
     return new StreamingCursor<GitHubPullRequestSummary>({
       fetchPage: async (page, perPage) => {
-        // "-v2": the previous entries held pages with touched rows filtered out.
-        const cacheKey = this.#cacheKey("list-pulls-v2", stableKey(filter ?? {}), `p${page}`);
+        // v3 invalidates normalized pages that predate milestone fields.
+        const cacheKey = this.#cacheKey("list-pulls-v3", stableKey(filter ?? {}), `p${page}`);
         return await this.#loadCachedWithEtag<GitHubPullRequestSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.listPullRequestsConditional(owner, repo, {
             state: filter?.state,
@@ -3347,7 +3408,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     // their body for the text match; keyed by state alone, so every search shares the pages.
     return new StreamingCursor<GitHubPullRequestSummary, PullSearchRow>({
       fetchPage: async (page, perPage) => {
-        const cacheKey = this.#cacheKey("search-pulls-v2", state, `p${page}`);
+        const cacheKey = this.#cacheKey("search-pulls-v3", state, `p${page}`);
         return await this.#loadCachedWithEtag<PullSearchRow[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.listPullRequestsConditional(owner, repo, {
             state,
