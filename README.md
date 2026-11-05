@@ -221,6 +221,11 @@ Each gatekeeper package contains instructions for how to set it up:
 
 ## Developing
 
+Use Node >=24.19.0 and pnpm 11.17.0, then install with `pnpm install --frozen-lockfile`.
+Run `pnpm lint` and `pnpm test` for workspace verification. See
+[nested gatekeeper app routing](docs/gatekeeper-app-routing.md) for the optional app navigation
+contract, focused Chromium tests, and uncached frontend build command.
+
 When developing, you'll want to run the front-end and back-end as two separate commands in two terminals:
 
     pnpm dev-server
