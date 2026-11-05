@@ -128,8 +128,10 @@ it('loads deep links through authenticated lookup and retains the frame and edit
   for (const invalid of ['//evil.test', '/%2foutputs', '/../outputs', 'https://evil.test', '/a?x', '/a#x']) {
     await expect(navigation.navigate(invalid)).rejects.toThrow('Invalid app-relative path')
   }
-  await expect(Reflect.get(navigation, 'navigate')('/valid', 'yes')).rejects.toThrow(/expected (union|boolean)/)
-  await expect(Reflect.get(navigation, 'setBlocked')('false')).rejects.toThrow(/boolean/)
+  // @ts-expect-error Deliberately send an invalid RPC argument to test runtime validation.
+  await expect(navigation.navigate('/valid', 'yes')).rejects.toThrow(/expected (union|boolean)/)
+  // @ts-expect-error Deliberately send an invalid RPC argument to test runtime validation.
+  await expect(navigation.setBlocked('false')).rejects.toThrow(/boolean/)
   expect(router.state.location.pathname).toBe('/models/outputs')
   // Local helpers must not be remotely callable through the app's narrow navigation capability.
   await expect(Reflect.get(navigation, 'updatePath')('/forged')).rejects.toThrow(/not|unknown|allowed|available/i)
