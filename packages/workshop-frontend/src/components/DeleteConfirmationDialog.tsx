@@ -14,6 +14,8 @@ interface DeleteConfirmationDialogProps {
   confirmingLabel?: string
   onOpenChange: (open: boolean) => void
   onConfirm: () => void
+  /** Place host leave confirmation above a sandbox app's full-viewport presentation. */
+  aboveAppOverlay?: boolean
 }
 
 export default function DeleteConfirmationDialog({
@@ -25,6 +27,7 @@ export default function DeleteConfirmationDialog({
   confirmingLabel = 'Deleting...',
   onOpenChange,
   onConfirm,
+  aboveAppOverlay = false,
 }: DeleteConfirmationDialogProps) {
   return (
     <Dialog.Root
@@ -34,7 +37,7 @@ export default function DeleteConfirmationDialog({
       }}
     >
       <Dialog
-        className="responsive-dialog !z-[1000] !w-[min(420px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0 !top-[20%] !-translate-y-0"
+        className={`responsive-dialog ${aboveAppOverlay ? '!z-[2147483640]' : '!z-[1000]'} !w-[min(420px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0 !top-[20%] !-translate-y-0`}
         size="sm"
       >
         <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">

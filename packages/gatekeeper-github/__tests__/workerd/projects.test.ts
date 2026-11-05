@@ -107,7 +107,7 @@ describe("whole-project connections", () => {
     const g = await setup();
     const result = await g.read("items");
     expect(result.pages).toMatchObject([[{ content: { kind: "issue" } }], [{ isArchived: true, content: { kind: "draftIssue" } }], null]);
-    expect(result.observations.map((o: { subresources: string[] }) => o.subresources)).toEqual([["repository/17"], []]);
+    expect(result.observations.map((o: { subresources: string[] }) => o.subresources)).toEqual([["project/P", "repository/17"], ["project/P"]]);
     expect(api.afters).toEqual([null, "next"]);
   });
 
@@ -173,11 +173,11 @@ describe("whole-project connections", () => {
     await expect(g.read("metadata")).rejects.toThrow("Reconnect GitHub");
   });
 
-  it("requires project access for observer admission", async () => {
+  it("requires project access for observation verification", async () => {
     const api = new FakeProjectApi();
     const g = await setup();
     api.projectAllowed = false;
-    await expect(g.observer()).rejects.toThrow("cannot read");
+    expect(await g.observer()).toEqual({ allowedObserverIds: [] });
     api.projectAllowed = true;
     expect(await g.observer()).toEqual({ allowedObserverIds: ["observer"] });
   });
@@ -197,7 +197,7 @@ describe("whole-project connections", () => {
     const api = new FakeProjectApi();
     const g = await setup();
     expect(api.projectAllowed).toBe(true);
-    await expect(g.observer(["project/OTHER"])).rejects.toThrow("Unknown GitHub project subresource");
+    await expect(g.observer(["unknown/OTHER"])).rejects.toThrow("Unknown GitHub project subresource");
   });
 });
 

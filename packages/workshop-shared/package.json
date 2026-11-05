@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "exports": {
+    "./app-navigation": {
+      "types": "./src/app-navigation.ts",
+      "import": "./src/app-navigation.ts"
+    },
     "./api": {
       "types": "./src/api.ts",
       "import": "./src/api.ts"

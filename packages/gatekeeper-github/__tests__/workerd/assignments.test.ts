@@ -30,7 +30,7 @@ class AssignmentApi {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const path = url.pathname;
+    const path = url.pathname.replace(/^\/repositories\/17(?=\/|$)/, "/repos/acme/widgets");
     if (request.method !== "GET") {
       const body = await request.json<Record<string, unknown>>();
       this.writes.push({ method: request.method, path, body });

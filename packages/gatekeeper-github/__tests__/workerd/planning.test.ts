@@ -36,12 +36,16 @@ class FakePlanningApi {
     }
     if (url.pathname.endsWith("/milestones/3")) return Response.json(milestone);
     if (/\/(issues|pulls)\/42$/.test(url.pathname)) return Response.json({
+      html_url: "https://github.com/acme/widgets/issues/42",
       number: 42, title: "Ship", state: "open", body: "Plan", user: null, labels: [], assignees: [],
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", comments: 0, milestone,
       head: { ref: "feature", sha: "a".repeat(40), repo: null },
       base: { ref: "main", sha: "b".repeat(40), repo: null }, draft: false,
     });
-    if (request.method === "GET") return Response.json({ id: 17, node_id: "R_pinned", default_branch: "main" });
+    if (request.method === "GET") return Response.json({
+      id: 17, node_id: "R_pinned", default_branch: "main", name: "widgets", full_name: "acme/widgets",
+      html_url: "https://github.com/acme/widgets", owner: { login: "acme" },
+    });
     const { query, variables } = await request.json<{ query: string; variables: { after?: string; id?: string } }>();
     if (query.includes("query ProjectAccess")) {
       this.checks++;
@@ -106,6 +110,7 @@ describe("planning reads through sessions", () => {
     const result = await g.read("milestones");
     expect(result.pages).toMatchObject([[{ number: 3 }], [], null]);
     expect(result.observations).toHaveLength(2);
+    expect(result.observations.map(observation => observation.subresources)).toEqual([["repo/17"], ["repo/17"]]);
     expect(api.afters).toEqual([]);
   });
 
@@ -133,6 +138,7 @@ describe("planning reads through sessions", () => {
     expect(result.pages).toMatchObject([[{ id: "item", isArchived: false }], [{ id: "item2", isArchived: true }], null]);
     expect(api.afters).toEqual([null, "next"]);
     expect(result.observations).toHaveLength(2);
+    expect(result.observations.map(observation => observation.subresources)).toEqual([["repo/17"], ["repo/17"]]);
   });
 
   it("does not skip a page when observation authorization fails", async () => {

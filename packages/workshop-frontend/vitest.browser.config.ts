@@ -2,6 +2,8 @@ import { defineConfig } from 'vitest/config'
 import { playwright } from '@vitest/browser-playwright'
 import react from '@vitejs/plugin-react'
 import tsconfigPaths from 'vite-tsconfig-paths'
+import capnwebValidate from 'capnweb-validate/vite'
+import tailwindcss from '@tailwindcss/vite'
 
 /**
  * The browser suite, `src/**\/*.browser.test.tsx`: what only a real browser shows -- pointer and
@@ -9,7 +11,8 @@ import tsconfigPaths from 'vite-tsconfig-paths'
  * rest of the tests run under `vite.config.ts`, which leaves these out.
  */
 export default defineConfig({
-  plugins: [react(), tsconfigPaths()],
+  plugins: [capnwebValidate(), react(), tailwindcss(), tsconfigPaths()],
+  optimizeDeps: { include: ['capnweb-validate/internal/core', 'capnweb-validate/internal/capnweb'] },
   test: {
     include: ['src/**/*.browser.test.tsx'],
     // Kept with vitest's other scratch, under node_modules/.vite, out of the source tree and the

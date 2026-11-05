@@ -22,16 +22,17 @@ export function projectEntrySubresources(entries: GitHubProjectEntry[]): string[
       : []))];
 }
 
-/** Only repository IDs this read reports are accepted by the project's observer oracle. */
+/** Verify every project and repository dependency reported by a project read. */
 export const verifyProjectObservers: VerifyObserverAccess = observerAccessVerifier<GitHubVerifierApi>({
   hasCollectionAccess: async (verifier, ids) => Promise.all(ids.map(id => {
     const parsed = parseSubresourceId(id);
-    const [repo] = parsed.fragments;
-    if (parsed.namespace || parsed.fragments.length !== 1 || repo.name !== "repository" ||
-        !/^[1-9]\d*$/.test(repo.id) || !Number.isSafeInteger(Number(repo.id))) {
+    const [resource] = parsed.fragments;
+    if (parsed.namespace || parsed.fragments.length !== 1) throw new Error("Unknown GitHub project subresource.");
+    if (resource.name === "project") return verifier.hasProjectAccess(resource.id);
+    if (resource.name !== "repository" || !/^[1-9]\d*$/.test(resource.id) || !Number.isSafeInteger(Number(resource.id))) {
       throw new Error("Unknown GitHub project subresource.");
     }
-    return verifier.hasRepoIdAccess(Number(repo.id));
+    return verifier.hasRepoAccess(Number(resource.id));
   })),
 });
 
@@ -94,13 +95,8 @@ export class GitHubProjectGatekeeper extends DurableObject<Env, GitHubProjectPro
     return this.#read(api => projectItemFields(api, id, itemId, first, after));
   }
 
-  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    const verifier = user as Fetcher<GitHubVerifierApi>;
-    if (!await verifier.hasProjectAccess(await this.#id())) {
-      throw new Error("This collaborator cannot read the connected GitHub project.");
-    }
-  }
-
+  async getHistoricalSubresources(): Promise<string[]> { return []; }
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
   async removeObserver(_id: string): Promise<void> {}
 
   async verifyObserverAccess(...args: Parameters<VerifyObserverAccess>) {
@@ -127,7 +123,13 @@ export class GitHubProjectSession extends RpcTarget implements GitHubProject {
   [Symbol.dispose](): void { this.queue[Symbol.dispose](); }
 
   async #observe(title: string, entries: GitHubProjectEntry[] = [], queue = this.queue): Promise<void> {
-    const description: ObservationDescription = { title, description: title, subresources: projectEntrySubresources(entries) };
+    const project = await this.gatekeeper.metadata();
+    const description: ObservationDescription & { subresources: string[] } = {
+      title, description: title, subresources: [
+        formatSubresourceId({ fragments: [{ name: "project", id: project.id }] }),
+        ...projectEntrySubresources(entries),
+      ],
+    };
     await queue.authorizeObservation(description);
   }
 
