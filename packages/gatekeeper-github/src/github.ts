@@ -206,6 +206,13 @@ import type {
   GitHubWorkflowRunSummary,
 } from "./types";
 import TYPES_CODE from "./types.txt";
+import PROJECT_TYPES_CODE from "./project-types.txt";
+import { GitHubProjectGatekeeper } from "./github-project";
+import { parseProjectUrl } from "./github-project-api";
+import { GitHubProjectConfiguratorUI } from "./github-project-configurator";
+import GITHUB_PROJECT_CONFIGURATOR_HTML from "./generated/github-project-configurator-ui.txt";
+export { GitHubProjectGatekeeper };
+
 import {
   GitHubIssueConfiguratorUI,
   GitHubPullRequestConfiguratorUI,
@@ -286,7 +293,12 @@ type StoredProvisionalResource = {
 
 type StoredActionState = "staged" | "pending" | "approved" | "rejected";
 
+type AssignmentRevertInfo =
+  | { type: "milestoneAssignment"; before: number | null; after: number | null; reverted?: boolean }
+  | { type: "assigneeAssignment"; before: string[]; after: string[]; reverted?: boolean };
+
 type GitHubRevertInfo =
+  | AssignmentRevertInfo
   | {
       type: "issueComment";
       commentId: number;
@@ -342,6 +354,18 @@ type RemoveLabelsAction = BaseEntityAction & {
   type: "removeLabels";
   labels: string[];
   previousLabels: string[];
+};
+
+type SetMilestoneAction = BaseEntityAction & {
+  type: "setMilestone";
+  milestone: GitHubMilestone | null;
+  previousMilestone: number | null;
+};
+
+type SetAssigneesAction = BaseEntityAction & {
+  type: "setAssignees";
+  assignees: string[];
+  previousAssignees: string[];
 };
 
 type ChangeStateAction = BaseEntityAction & {
@@ -422,6 +446,8 @@ type GitHubAction =
   | AddLabelsAction
   | RemoveLabelsAction
   | ChangeStateAction
+  | SetMilestoneAction
+  | SetAssigneesAction
   | PostCommentAction
   | PostReviewAction
   | ReplyToDiffCommentAction
@@ -489,6 +515,16 @@ function describeGitHubAction(action: GitHubAction): RenderedDescription {
       return noteReferenceRewrite(
         buildDescription(`Replace the Markdown body of #${action.targetId}.`)
           .verbatim("New body", action.bodyMarkdown, "markdown"), action.bodyMarkdown)
+        .finish();
+    case "setMilestone":
+      return buildDescription(`Replace the milestone of #${action.targetId}.`)
+        .inline("Previous milestone", action.previousMilestone === null ? "None" : String(action.previousMilestone))
+        .inline("New milestone", action.milestone ? `#${action.milestone.number}: ${action.milestone.title}` : "None")
+        .finish();
+    case "setAssignees":
+      return buildDescription(`Replace all assignees of #${action.targetId} with the following set.`)
+        .list("Previous assignees", action.previousAssignees)
+        .list("New assignees (empty clears all)", action.assignees)
         .finish();
     case "addLabels":
       return buildDescription(`Add labels to #${action.targetId}.`)
@@ -582,6 +618,8 @@ const ACTION_KINDS = {
   createPullRequest: { tag: "github.createPullRequest", label: "Create pull requests" },
   setTitle: { tag: "github.setTitle", label: "Rename issues and pull requests" },
   setBody: { tag: "github.setBody", label: "Edit issue and pull request bodies" },
+  setMilestone: { tag: "github.setMilestone", label: "Assign or remove milestones" },
+  setAssignees: { tag: "github.setAssignees", label: "Replace assignees" },
   addLabels: { tag: "github.addLabels", label: "Add labels" },
   removeLabels: { tag: "github.removeLabels", label: "Remove labels" },
   changeState: { tag: "github.changeState", label: "Close and reopen issues and pull requests" },
@@ -599,7 +637,7 @@ type AutoApprovalKind = keyof typeof ACTION_KINDS;
 // those its actions can carry. Merges never appear: they are never auto-approvable. Pushes do,
 // though one to the default or a protected branch always waits for a person.
 const ISSUE_ACTIONS: AutoApprovalKind[] =
-  ["setTitle", "setBody", "addLabels", "removeLabels", "changeState", "postComment"];
+  ["setTitle", "setBody", "setMilestone", "setAssignees", "addLabels", "removeLabels", "changeState", "postComment"];
 const PULL_ACTIONS: AutoApprovalKind[] = [...ISSUE_ACTIONS, "postReview", "replyToDiffComment"];
 const BINDING_ACTIONS: Record<ResourceKind, AutoApprovalKind[]> = {
   repo: ["createIssue", "createPullRequest", ...PULL_ACTIONS, "push", "forcePush"],
@@ -711,7 +749,21 @@ const PULL_REQUEST_RESOURCE: SupportedResource = {
   description: "Read and manage a specific GitHub pull request and its review threads.",
 };
 
+const ORG_PROJECT_RESOURCE: SupportedResource = {
+  urlPattern: "https://github.com/orgs/:owner/projects/:number",
+  title: "GitHub Project",
+  description: "Read one GitHub Project, its fields, draft items, and linked issues and pull requests.",
+};
+const USER_PROJECT_RESOURCE: SupportedResource = {
+  urlPattern: "https://github.com/users/:owner/projects/:number",
+  title: "GitHub User Project",
+  description: "Read one user-owned GitHub Project.",
+  groupedWith: ORG_PROJECT_RESOURCE.urlPattern,
+};
+
 const SUPPORTED_RESOURCES: SupportedResource[] = [
+  ORG_PROJECT_RESOURCE,
+  USER_PROJECT_RESOURCE,
   REPO_RESOURCE,
   ISSUE_RESOURCE,
   PULL_REQUEST_RESOURCE,
@@ -1017,6 +1069,19 @@ function matchesAllLabels(item: { labels: GitHubLabel[] }, labels?: string[]): b
 }
 
 /** GitHub matches logins case-insensitively. */
+function validateMilestoneFilter(filter?: GitHubIssueFilter): void {
+  if (typeof filter?.milestone === "number" &&
+      (!Number.isSafeInteger(filter.milestone) || filter.milestone < 1)) {
+    throw new Error("Milestone number must be a positive integer.");
+  }
+}
+
+function sameAssignees(left: string[], right: string[]): boolean {
+  const leftSet = new Set(left.map(login => login.toLowerCase()));
+  const rightSet = new Set(right.map(login => login.toLowerCase()));
+  return leftSet.size === rightSet.size && [...leftSet].every(login => rightSet.has(login));
+}
+
 function sameLogin(login: string | undefined, wanted: string): boolean {
   return login?.toLowerCase() === wanted.toLowerCase();
 }
@@ -1024,10 +1089,13 @@ function sameLogin(login: string | undefined, wanted: string): boolean {
 /** The structured predicates issue and pull request searches share with the issue listing. */
 function issueMatchesFilter(
   item: GitHubIssueSummary | GitHubPullRequestSummary,
-  filter?: Pick<GitHubIssueFilter, "state" | "labels" | "author" | "assignee">,
+  filter?: Pick<GitHubIssueFilter, "state" | "labels" | "author" | "assignee" | "milestone">,
 ): boolean {
   if (!filter) return true;
-  const { state, labels, author, assignee } = filter;
+  const { state, labels, author, assignee, milestone } = filter;
+  if (milestone === "none" && item.milestone) return false;
+  if (milestone === "*" && !item.milestone) return false;
+  if (typeof milestone === "number" && item.milestone?.number !== milestone) return false;
   if (state && state !== "all" && item.state !== state) return false;
   if (!matchesAllLabels(item, labels)) return false;
   if (author && !sameLogin(item.author?.login, author)) return false;
@@ -1482,7 +1550,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return TYPES_CODE;
+    return TYPES_CODE + "\n" + PROJECT_TYPES_CODE;
   }
 }
 
@@ -1786,6 +1854,17 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       throw new Error(`Unsupported GitHub URL: ${url}`);
     }
 
+    const project = parseProjectUrl(url);
+    if (project) {
+      return {
+        class: this.ctx.exports.GitHubProjectGatekeeper({ props: { ...project, userObjectId: this.ctx.props.userObjectId } }),
+        resource: project.ownerType === "organization" ? ORG_PROJECT_RESOURCE : USER_PROJECT_RESOURCE,
+      };
+    }
+    if (segments[2] === "projects") {
+      throw new Error(`Unsupported GitHub project URL: ${url}`);
+    }
+
     const [owner, repo, kind, number] = segments;
     const props: GitHubGatekeeperImplProps = {
       userObjectId: this.ctx.props.userObjectId,
@@ -1815,6 +1894,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     resourceUrlPattern: string,
   ): Promise<ResourceConfiguratorFrame> {
     const read = accountReader(this.ctx.exports, this.ctx.props.userObjectId);
+
+    if (resourceUrlPattern === ORG_PROJECT_RESOURCE.urlPattern || resourceUrlPattern === USER_PROJECT_RESOURCE.urlPattern) {
+      return { iframeHtml: GITHUB_PROJECT_CONFIGURATOR_HTML, ui: new RpcStub(new GitHubProjectConfiguratorUI(read)) };
+    }
 
     if (resourceUrlPattern === REPO_RESOURCE.urlPattern) {
       return {
@@ -2027,6 +2110,7 @@ function assertSearchScope(
 @validateRpc()
 export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImplProps>
   implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
+  readonly #assignmentWrites = new SerialTaskQueue();
 
   #pendingActionsCache?: GitHubAction[];
 
@@ -2749,6 +2833,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         return action.provisionalId === provisionalId;
       case "setTitle":
       case "setBody":
+      case "setMilestone":
+      case "setAssignees":
       case "addLabels":
       case "removeLabels":
       case "changeState":
@@ -2933,6 +3019,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       switch (action.type) {
         case "setTitle":
         case "setBody":
+        case "setMilestone":
+        case "setAssignees":
         case "addLabels":
         case "removeLabels":
         case "changeState":
@@ -3146,7 +3234,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #getRemoteIssueDetails(realId: string): Promise<GitHubIssueDetails> {
-    const key = this.#cacheKey("issue", realId);
+    // v2: milestone joined the details; old ETags cannot migrate normalized cache entries.
+    const key = this.#cacheKey("issue-v2", realId);
     const details = await this.#loadCachedWithEtag<GitHubIssueDetails>(key, ENTITY_CACHE_TTL_MS, async etag => {
       const result = await this.#withApi(api =>
         api.getIssueConditional(this.ctx.props.owner, this.ctx.props.repo, Number(realId), { ifNoneMatch: etag })
@@ -3169,8 +3258,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #getRemotePullRequestDetails(realId: string, ttlMs = ENTITY_CACHE_TTL_MS): Promise<GitHubPullRequestDetails> {
-    // v2: the details gained `mergeState`, and etag revalidation can keep an old-shaped entry alive.
-    const key = this.#cacheKey("pull-v2", realId);
+    // v3: milestone joined the details; a 304 must not preserve the older normalized shape.
+    const key = this.#cacheKey("pull-v3", realId);
     const details = await this.#loadCachedWithEtag<GitHubPullRequestDetails>(
       key,
       ttlMs,
@@ -3330,6 +3419,14 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
             result.updatedAt = new Date(action.submittedAt);
           }
           break;
+        case "setMilestone":
+          result.milestone = action.milestone;
+          result.updatedAt = new Date(action.submittedAt);
+          break;
+        case "setAssignees":
+          result.assignees = action.assignees.map(actorFromLogin);
+          result.updatedAt = new Date(action.submittedAt);
+          break;
         case "addLabels": {
           const existing = new Set(result.labels.map(label => label.name.toLowerCase()));
           for (const label of action.labels) {
@@ -3403,6 +3500,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #listIssueSummaries(filter: GitHubIssueFilter | undefined, pageSize: number): Promise<Cursor<GitHubIssueSummary>> {
+    validateMilestoneFilter(filter);
     const compare = issueComparator(filter?.sort, filter?.direction);
     const touched = await this.#buildTouchedIssueSummaries(item => issueMatchesFilter(item, filter), compare);
 
@@ -3416,15 +3514,16 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
     // Pull request rows stay as null placeholders so a page keeps its upstream length, which is
-    // what ends the walk. "-v2": the previous entries held filtered (short) pages.
+    // what ends the walk. v3 also invalidates normalized pages that predate milestone fields.
     return new StreamingCursor<GitHubIssueSummary, GitHubIssueSummary | null>({
       fetchPage: async (page, perPage) => {
-        const cacheKey = this.#cacheKey("list-issues-v2", stableKey(filter ?? {}), `p${page}`);
+        const cacheKey = this.#cacheKey("list-issues-v3", stableKey(filter ?? {}), `p${page}`);
         return await this.#loadCachedWithEtag<(GitHubIssueSummary | null)[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.listIssuesConditional(owner, repo, {
             state: filter?.state,
             labels: filter?.labels?.join(","),
             creator: filter?.author,
+            milestone: filter?.milestone,
             assignee: filter?.assignee,
             sort: filter?.sort,
             direction: filter?.direction,
@@ -3454,9 +3553,15 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #searchIssueSummaries(query: GitHubIssueSearch, pageSize: number): Promise<Cursor<GitHubIssueSummary>> {
+    validateMilestoneFilter(query);
     const remoteSort = query.sort ?? "created";
     const remoteDirection = query.direction ?? "desc";
     const compare = issueComparator(remoteSort, remoteDirection);
+    // GitHub cannot see pending assignee edits. Keep its text/comment matching, but broaden the
+    // provider query while such edits exist, then apply the requested assignee to overlaid rows.
+    const pendingAssignees = this.#listPendingActions().some(action =>
+      action.type === "setAssignees" && action.targetKind === "issue");
+    const remoteQuery = pendingAssignees ? { ...query, assignee: undefined } : query;
 
     const provisionals = (await Promise.all(this.#listPendingActions()
       .filter((action): action is CreateIssueAction => action.type === "createIssue")
@@ -3471,10 +3576,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         // passed to another repository, and GitHub refuses a search by a renamed one's old name.
         const current = await this.#currentRepoName();
         const cacheKey = this.#cacheKey(
-          "search-issues-scoped-v1", current.owner, current.repo, stableKey(query), `p${page}`);
+          "search-issues-scoped-v2", current.owner, current.repo, stableKey(remoteQuery), `p${page}`);
         const results = await this.#loadCachedWithEtag<CachedIssueSearchResult[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.searchIssuesConditional(
-            buildIssueSearchQuery(current.owner, current.repo, query), page, perPage, remoteSort,
+            buildIssueSearchQuery(current.owner, current.repo, remoteQuery), page, perPage, remoteSort,
             remoteDirection, { ifNoneMatch: etag }));
           if (raw.status === 304) {
             return raw;
@@ -3532,8 +3637,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const repo = this.ctx.props.repo;
     return new StreamingCursor<GitHubPullRequestSummary>({
       fetchPage: async (page, perPage) => {
-        // "-v2": the previous entries held pages with touched rows filtered out.
-        const cacheKey = this.#cacheKey("list-pulls-v2", stableKey(filter ?? {}), `p${page}`);
+        // v3 invalidates normalized pages that predate milestone fields.
+        const cacheKey = this.#cacheKey("list-pulls-v3", stableKey(filter ?? {}), `p${page}`);
         return await this.#loadCachedWithEtag<GitHubPullRequestSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.listPullRequestsConditional(owner, repo, {
             state: filter?.state,
@@ -3588,7 +3693,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     // their body for the text match; keyed by state alone, so every search shares the pages.
     return new StreamingCursor<GitHubPullRequestSummary, PullSearchRow>({
       fetchPage: async (page, perPage) => {
-        const cacheKey = this.#cacheKey("search-pulls-v2", state, `p${page}`);
+        const cacheKey = this.#cacheKey("search-pulls-v3", state, `p${page}`);
         return await this.#loadCachedWithEtag<PullSearchRow[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.listPullRequestsConditional(owner, repo, {
             state,
@@ -4407,6 +4512,13 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "setMilestone":
+      case "setAssignees": {
+        const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
+        if (!realId) throw new Error(`Target ${action.targetId} has not been created on GitHub yet.`);
+        await this.#writeAssignment(action, Number(realId), false);
+        return;
+      }
       case "addLabels": {
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
         if (!realId) throw new Error(`Target ${action.targetId} has not been created on GitHub yet.`);
@@ -4739,6 +4851,13 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "setMilestone":
+      case "setAssignees": {
+        const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
+        if (!realId) return { message: "The target resource no longer exists on GitHub.", canRetry: false };
+        await this.#writeAssignment(action, Number(realId), true);
+        return;
+      }
       case "addLabels":
       case "removeLabels": {
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
@@ -4813,6 +4932,66 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           canRetry: false,
         };
     }
+  }
+
+  /** Persist apply-time undo state before PATCH, retaining it across failures and lost replies. */
+  async #writeAssignment(action: SetMilestoneAction | SetAssigneesAction, realId: number, revert: boolean): Promise<void> {
+    await this.#assignmentWrites.run(async () => {
+      const record = this.#requireActionRecord(action.approvalId);
+      if (!revert && record.state === "approved") return;
+      if (record.state === "rejected") throw new Error("This assignment action was discarded.");
+      let info = record.revertInfo;
+      if (revert && (!info || (info.type !== "milestoneAssignment" && info.type !== "assigneeAssignment"))) {
+        throw new Error("This assignment has no apply-time undo state.");
+      }
+      if ((info?.type === "milestoneAssignment" || info?.type === "assigneeAssignment") && info.reverted) return;
+      const current = await this.#readApi(api => api.getIssue(action.owner, action.repo, realId));
+      if (!info) {
+        info = action.type === "setMilestone"
+          ? { type: "milestoneAssignment", before: current.milestone?.number ?? null, after: action.milestone?.number ?? null }
+          : { type: "assigneeAssignment", before: (current.assignees ?? []).map(user => user.login), after: [...action.assignees] };
+        record.revertInfo = info;
+        this.#putActionRecord(action.approvalId, record);
+      }
+      if (info.type !== "milestoneAssignment" && info.type !== "assigneeAssignment") {
+        throw new Error("Invalid assignment undo state.");
+      }
+      const matches = (result: GitHubIssueResponse, target: "before" | "after") => info.type === "milestoneAssignment"
+        ? (result.milestone?.number ?? null) === info[target]
+        : sameAssignees((result.assignees ?? []).map(user => user.login), info[target]);
+      const target = revert ? "before" : "after";
+      if (!matches(current, target)) {
+        if (!matches(current, revert ? "after" : "before")) {
+          throw new Error("The assignment changed on GitHub. Refusing to overwrite the newer assignment; review it and submit a new change.");
+        }
+        let result: GitHubIssueResponse;
+        try {
+          result = await this.#withApi(api => api.updateIssue(action.owner, action.repo, realId,
+            info.type === "milestoneAssignment" ? { milestone: info[target] } : { assignees: info[target] }));
+        } finally {
+          this.#clearCaches();
+        }
+        if (!matches(result, target)) throw new Error("GitHub did not apply the requested assignment. Check repository write access and assignee eligibility.");
+      }
+      if (revert) {
+        info.reverted = true;
+        record.revertInfo = info;
+        this.#putRetiredActionRecord(action.approvalId, record);
+      } else {
+        this.#markActionApproved(action, info);
+      }
+      this.#clearCaches();
+    });
+  }
+
+  async listAssignees(pageSize: number, queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubActor>> {
+    const ownedQueue = queue.dup();
+    return new PlanningCursor(async after => {
+      const page = Number(after ?? "1");
+      const users = await this.#readApi(api => api.listAssignees(this.ctx.props.owner, this.ctx.props.repo, page, pageSize));
+      await this.authorizeRead(ownedQueue, { title: "List GitHub assignees", description: "Read assignable users in the connected repository." });
+      return { items: actorsFromUsers(users), next: users.length === pageSize ? String(page + 1) : undefined };
+    }, () => ownedQueue[Symbol.dispose]());
   }
 
   async getMilestone(number: number): Promise<GitHubMilestone> {
@@ -6292,6 +6471,28 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     };
   }
 
+  async prepareSetMilestone(targetKind: EntityKind, targetId: string, number: number | null): Promise<SetMilestoneAction> {
+    if (number !== null && (!Number.isSafeInteger(number) || number < 1)) throw new Error("Milestone number must be a positive integer.");
+    const details = targetKind === "issue" ? await this.#getIssueDetails(targetId) : await this.#getPullRequestDetails(targetId);
+    const milestone = number === null ? null : await this.getMilestone(number);
+    return { type: "setMilestone", approvalId: this.#nextActionId(), submittedAt: Date.now(),
+      owner: this.ctx.props.owner, repo: this.ctx.props.repo, targetKind, targetId,
+      milestone, previousMilestone: details.milestone?.number ?? null };
+  }
+
+  async prepareSetAssignees(targetKind: EntityKind, targetId: string, logins: string[]): Promise<SetAssigneesAction> {
+    if (logins.some(login => !/^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$/.test(login))) {
+      throw new Error("Assignees must be GitHub logins, without @ prefixes or whitespace.");
+    }
+    const assignees = [...new Map(logins.map(login => [login.toLowerCase(), login])).values()];
+    if (assignees.length > 10) throw new Error("At most 10 assignees can be assigned.");
+    const details = targetKind === "issue" ? await this.#getIssueDetails(targetId) : await this.#getPullRequestDetails(targetId);
+    for (const login of assignees) await this.#readApi(api => api.checkAssignee(this.ctx.props.owner, this.ctx.props.repo, login));
+    return { type: "setAssignees", approvalId: this.#nextActionId(), submittedAt: Date.now(),
+      owner: this.ctx.props.owner, repo: this.ctx.props.repo, targetKind, targetId,
+      assignees, previousAssignees: details.assignees.map(actor => actor.login) };
+  }
+
   async prepareAddLabels(targetKind: EntityKind, targetId: string, labels: string[]): Promise<AddLabelsAction> {
     const details = targetKind === "issue" ? await this.#getIssueDetails(targetId) : await this.#getPullRequestDetails(targetId);
     return {
@@ -6732,6 +6933,10 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     return this.#gatekeeper.listMilestones(options ?? {}, pageSizeOf(options), this.#approvalQueue);
   }
 
+  async listAssignees(options?: GitHubPageOptions): Promise<Cursor<GitHubActor>> {
+    return this.#gatekeeper.listAssignees(pageSizeOf(options), this.#approvalQueue);
+  }
+
   async getMilestone(number: number): Promise<GitHubMilestone> {
     const milestone = await this.#gatekeeper.getMilestone(number);
     await this.#gatekeeper.authorizeRead(this.#approvalQueue, { title: `Read GitHub milestone #${number}`, description: "Read a milestone in the connected repository." });
@@ -6992,6 +7197,20 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
     await this.gatekeeper.submitActionForApproval(this.approvalQueue, action, {
       title: `Edit body of #${this.logicalId}`,
       implementsRevert: true,
+    });
+  }
+
+  async setMilestone(number: number | null): Promise<void> {
+    const action = await this.gatekeeper.prepareSetMilestone(this.kind, this.logicalId, number);
+    await this.gatekeeper.submitActionForApproval(this.approvalQueue, action, {
+      title: `Set milestone for #${this.logicalId}`, implementsRevert: true,
+    });
+  }
+
+  async setAssignees(logins: string[]): Promise<void> {
+    const action = await this.gatekeeper.prepareSetAssignees(this.kind, this.logicalId, logins);
+    await this.gatekeeper.submitActionForApproval(this.approvalQueue, action, {
+      title: `Set assignees for #${this.logicalId}`, implementsRevert: true,
     });
   }
 

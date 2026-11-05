@@ -17,6 +17,9 @@ export interface GitHubRepo {
   /** Read a milestone by its repository-local number. */
   getMilestone(number: number): Promise<GitHubMilestone>;
 
+  /** List users eligible for assignment in this repository. Dispose the cursor after reading it to null. */
+  listAssignees(options?: GitHubPageOptions): Promise<Cursor<GitHubActor>>;
+
   /** Returns basic metadata about the repository. */
   getMetadata(): Promise<GitHubRepoMetadata>;
 
@@ -261,6 +264,14 @@ export interface GitHubIssue {
 
   /** Returns the current issue metadata and body. */
   getDetails(): Promise<GitHubIssueDetails>;
+
+  /** Assign a repository-local milestone number, or null to remove the current milestone. Also available on PRs. Requires repository write access. */
+  setMilestone(number: number | null): Promise<void>;
+
+  /** Replace all assignees with these GitHub logins; [] removes everyone. Also available on PRs.
+   * Use the repository's listAssignees() to discover eligible users. Requires repository write access.
+   */
+  setAssignees(logins: string[]): Promise<void>;
 
   /** Replaces the issue title. */
   setTitle(title: string): Promise<void>;
@@ -893,6 +904,8 @@ export type GitHubPageOptions = {
 
 /** Filters for listing issues. */
 export type GitHubIssueFilter = GitHubPageOptions & {
+  /** Milestone number, "none" for unassigned issues, or "*" for any assigned milestone. */
+  milestone?: number | "none" | "*";
   state?: GitHubIssueState | "all";
   labels?: string[];
   author?: string;

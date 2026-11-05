@@ -12,6 +12,7 @@ const project = { id: "project", number: 1, title: "Roadmap", url: "https://gith
 
 class FakePlanningApi {
   allowed = false;
+  conditionalIssues = 0;
   checks = 0;
   afters: (string | null)[] = [];
   fieldAfters: (string | null)[] = [];
@@ -26,6 +27,10 @@ class FakePlanningApi {
   }
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (/\/(issues|pulls)\/42$/.test(url.pathname) && request.headers.has("if-none-match")) {
+      this.conditionalIssues++;
+      return new Response(null, { status: 304, headers: { ETag: '"unchanged"' } });
+    }
     if (url.pathname.endsWith("/milestones")) {
       return Response.json(url.searchParams.get("page") === "1" ? [milestone] : []);
     }
@@ -107,6 +112,22 @@ describe("planning reads through sessions", () => {
     expect(result.observations).toHaveLength(2);
     expect(result.observations.map(observation => observation.subresources)).toEqual([["repo/17"], ["repo/17"]]);
     expect(api.afters).toEqual([]);
+  });
+
+  it.each(["issue", "pull"] as const)("refreshes pre-milestone cached %s details instead of revalidating their old ETag", async kind => {
+    const api = new FakePlanningApi();
+    const g = await setup();
+    const oldKey = kind === "issue" ? "cache:issue:42" : "cache:pull-v2:42";
+    await g.hooks.seedGatekeeper("planning", g.props, {
+      [oldKey]: { generation: 0, fetchedAt: 0, etag: '"unchanged"',
+        value: { id: "42", title: "Ship", commentCount: 0 } },
+    });
+    const read = () => kind === "issue" ? unwrap(g.hooks.openIssue("planning", g.props, "42")) :
+      unwrap(g.hooks.openPullRequest("planning", g.props, "42"));
+    expect((await read()).milestone?.number).toBe(3);
+    expect(api.conditionalIssues).toBe(0);
+    await g.restart();
+    expect((await read()).milestone?.number).toBe(3);
   });
 
   it.each(["repo", "issue", "pull"] as const)("paginates project memberships on a %s binding", async kind => {

@@ -60,7 +60,7 @@ export type IssueProjectsResponse = {
 };
 
 const FIELD = "field { ... on ProjectV2FieldCommon { id name dataType } }";
-const VALUE_FIELDS = `
+export const VALUE_FIELDS = `
   __typename
   ... on ProjectV2ItemFieldTextValue { ${FIELD} text }
   ... on ProjectV2ItemFieldNumberValue { ${FIELD} number }

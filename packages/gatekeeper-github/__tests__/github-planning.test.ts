@@ -120,3 +120,13 @@ describe("planning data", () => {
       .toEqual({ items: [], next: "next" });
   });
 });
+
+
+describe("milestone issue filter", () => {
+  it.each([3, "none", "*"] as const)("sends milestone %s to GitHub", async milestone => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json([]));
+    vi.stubGlobal("fetch", fetch);
+    await api().listIssues("acme", "widgets", { milestone, per_page: 50, page: 1 });
+    expect(new URL(fetch.mock.calls[0]![0] as string).searchParams.get("milestone")).toBe(String(milestone));
+  });
+});

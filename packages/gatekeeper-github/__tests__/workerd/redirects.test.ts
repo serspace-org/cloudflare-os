@@ -26,9 +26,19 @@ describe("getGatekeeperClassFor", () => {
   });
 
   it.each([
+    "https://github.com/orgs/acme/projects/new",
+    "https://github.com/users/ada/projects/12abc",
+    "https://github.com/acme/widgets/projects/1",
+  ])("never widens malformed or classic project URL %s to a repository", async url => {
+    expect(await hooks().resourcePatternFor(url)).toEqual({ error: `Unsupported GitHub project URL: ${url}` });
+  });
+
+  it.each([
     ["https://github.com/octo/repo/issues/12", "https://github.com/:owner/:repo/issues/:number"],
     ["https://github.com/octo/repo/pull/7/files", "https://github.com/:owner/:repo/pull/:number"],
     ["https://github.com/octo/repo", "https://github.com/:owner/:repo"],
+    ["https://github.com/orgs/acme/projects/1", "https://github.com/orgs/:owner/projects/:number"],
+    ["https://github.com/users/ada/projects/2", "https://github.com/users/:owner/projects/:number"],
   ])("resolves %s", async (url, pattern) => {
     expect(await hooks().resourcePatternFor(url)).toEqual({ ok: pattern });
   });
