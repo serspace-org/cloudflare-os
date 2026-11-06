@@ -38,7 +38,7 @@ export function validateProjectInput(field: GitHubIssueProjectField,
       if (!Array.isArray(value.optionIds) || value.optionIds.some(id => !nonempty(id) || !field.options?.some(option => option.id === id))) {
         throw new Error("Select options do not belong to this project field.");
       }
-      const optionIds = [...new Set(value.optionIds)].sort();
+      const optionIds = [...new Set(value.optionIds)].toSorted();
       return optionIds.length ? { kind: "multiSelect", optionIds } : null;
     }
     case "iteration":
@@ -58,7 +58,7 @@ export function projectInput(value: GitHubProjectFieldValue["value"] | undefined
     case "number": return value.number === null ? null : { kind: "number", number: value.number };
     case "date": return value.date === null ? null : { kind: "date", date: value.date };
     case "singleSelect": return value.optionId === null ? null : { kind: "singleSelect", optionId: value.optionId };
-    case "multiSelect": return value.options.length ? { kind: "multiSelect", optionIds: value.options.map(option => option.id).sort() } : null;
+    case "multiSelect": return value.options.length ? { kind: "multiSelect", optionIds: value.options.map(option => option.id).toSorted() } : null;
     case "iteration": return { kind: "iteration", iterationId: value.iterationId };
     default: throw new Error("This project field value cannot be safely edited or restored.");
   }

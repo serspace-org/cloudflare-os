@@ -32,7 +32,7 @@ class ProjectApi {
     return { field, __typename: "ProjectV2ItemFieldNumberValue", number: value.number };
   }
   async fetch(request: Request): Promise<Response> {
-    if (request.method === "GET" && /\/issues\/42$/.test(new URL(request.url).pathname)) {
+    if (request.method === "GET" && new URL(request.url).pathname.endsWith("/issues/42")) {
       return Response.json({ number: 42, title: "Ship", body: "Plan", state: "open", user: null,
         labels: [], assignees: [], milestone: null, comments: 0, html_url: "https://github.com/acme/widgets/issues/42",
         created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
@@ -128,7 +128,14 @@ describe("approval-gated issue project fields", () => {
     expect(await g.read()).toMatchObject([{ value: { name: "Done" } }]);
     const action = g.queue.actions[0];
     expect(action.description).toMatchObject({ actionKind: { tag: "github.setProjectField" }, autoApprovable: false, implementsRevert: true });
-    expect(action.description.description).toContain("Status");
+    expect(action.description.description).toBe("Change a project field of #42.");
+    expect(action.description.fields).toEqual(expect.arrayContaining([
+      { kind: "inline", label: "Project ID", value: "project" },
+      { kind: "inline", label: "Item ID", value: "item" },
+      { kind: "inline", label: "Field", value: "Status (status)" },
+      { kind: "text", label: "Previous value", value: JSON.stringify({ kind: "singleSelect", optionId: "todo" }) },
+      { kind: "text", label: "New value (null clears)", value: JSON.stringify(done) },
+    ]));
     await g.apply(action.id);
     expect(g.api.writes).toEqual([{ projectId: "project", itemId: "item", fieldId: "status", value: { singleSelectOptionId: "done" } }]);
     await g.restart();
