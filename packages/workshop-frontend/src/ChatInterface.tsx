@@ -824,7 +824,7 @@ function getToolIcon(
   }
 }
 
-const userBubbleClassName = `themed-user-bubble-shadow w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`;
+const userBubbleClassName = `text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`;
 
 function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undefined) {
   switch (toolName) {
@@ -2316,6 +2316,24 @@ function continuesUserGroup(
   return author !== null && author.id === userMessageAuthor(curr)?.id;
 }
 
+/** Who sent `entry`, if it is an agent's (or gadget's) message. */
+function agentMessageAuthor(entry: ChatDisplayEntry | undefined): AiChatAuthorInfo | null {
+  if (entry?.type !== "message") return null;
+  const msg = entry.message;
+  return (msg.type === "message" || msg.type === "slashCommand") && msg.author.type !== "user"
+    ? msg.author
+    : null;
+}
+
+/** Consecutive agent messages from the same author read as one group, like user messages. */
+function continuesAgentGroup(
+  prev: ChatDisplayEntry | undefined,
+  curr: ChatDisplayEntry | undefined,
+): boolean {
+  const author = agentMessageAuthor(prev);
+  return author !== null && author.id === agentMessageAuthor(curr)?.id;
+}
+
 // How close to the top of the transcript pulls in the previous page. Roughly a screenful of slack,
 // so the messages are there by the time the user scrolls to them.
 const EARLIER_PAGE_PREFETCH_PX = 600;
@@ -2362,6 +2380,7 @@ function rhythmTopClass(
   if (curr.type === "modelChange") return "mt-4";
   if (prev.type === "modelChange") return "mt-2";
   if (continuesUserGroup(prev, curr)) return "mt-2";
+  if (continuesAgentGroup(prev, curr)) return "mt-2";
   if (isUserMessageEntry(prev) || isUserMessageEntry(curr)) return "mt-5";
   if (entryEndsInWorkRow(prev) && entryStartsWithWorkRow(curr)) return "mt-2";
   return "mt-4";
@@ -5968,14 +5987,30 @@ function ChatInterface({
                       }
 
                       const msg = entry.message;
-                      const endsUserGroup = !continuesUserGroup(entry, displayEntries[entryIndex + 1]);
+                      const startsUserGroup = !continuesUserGroup(displayEntries[entryIndex - 1], entry);
+                      const startsAgentGroup = !continuesAgentGroup(displayEntries[entryIndex - 1], entry);
 
                       return (
                         <div key={entry.key} className={entryTopClass}>
                         {/* ── user / AI text message ── */}
                         {msg.type === "slashCommand" && (
-                          <div className="group/message relative flex flex-col items-end">
-                            <div className="themed-user-bubble-shadow w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default">
+                          <div className="group/message relative flex flex-col items-start">
+                            {startsUserGroup && (
+                              <div className="mb-0.5 flex items-baseline gap-2">
+                                {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
+                                  <span className="font-semibold text-[13px] text-kumo-default">{msg.author.name}</span>
+                                )}
+                                <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                  <span className="font-mono text-[11px] text-kumo-inactive">
+                                    {msg.timestamp.toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+                                </Tooltip>
+                              </div>
+                            )}
+                            <div className={userBubbleClassName}>
                               <span className="whitespace-pre-wrap">
                                 <SlashCommandMention
                                   name={msg.skillName}
@@ -5986,26 +6021,27 @@ function ChatInterface({
                                 />
                               </span>
                             </div>
-                            {endsUserGroup && (
-                              <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-100 transition-opacity duration-150 ease-out sm:opacity-0 sm:group-hover/message:opacity-100 sm:group-focus-within/message:opacity-100">
-                                {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
-                                  <span className="font-medium">{msg.author.name}</span>
-                                )}
-                                <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                  <span className="font-mono">
-                                    {msg.timestamp.toLocaleTimeString([], {
-                                      hour: "2-digit",
-                                      minute: "2-digit",
-                                    })}
-                                  </span>
-                                </Tooltip>
-                              </div>
-                            )}
                           </div>
                         )}
                         {msg.type === "message" && (
                           msg.author.type === "user" ? (
-                            <div className="group/message relative flex flex-col items-end">
+                            <div className="group/message relative flex flex-col items-start">
+                              {startsUserGroup && (
+                                <div className="mb-0.5 flex items-baseline gap-2">
+                                  {/* hideOwnUserName implies currentUser is non-null (see memo). */}
+                                  {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
+                                    <span className="font-semibold text-[13px] text-kumo-default">{msg.author.name}</span>
+                                  )}
+                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                    <span className="font-mono text-[11px] text-kumo-inactive">
+                                      {msg.timestamp.toLocaleTimeString([], {
+                                        hour: "2-digit",
+                                        minute: "2-digit",
+                                      })}
+                                    </span>
+                                  </Tooltip>
+                                </div>
+                              )}
                               <div className={userBubbleClassName}>
                                 {msg.attachments && msg.attachments.length > 0 && (
                                   <ChatAttachmentGrid
@@ -6035,22 +6071,6 @@ function ChatInterface({
                                   />
                                 )}
                               </div>
-                              {endsUserGroup && (
-                                <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-100 transition-opacity duration-150 ease-out sm:opacity-0 sm:group-hover/message:opacity-100 sm:group-focus-within/message:opacity-100">
-                                  {/* hideOwnUserName implies currentUser is non-null (see memo). */}
-                                  {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
-                                    <span className="font-medium">{msg.author.name}</span>
-                                  )}
-                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                    <span className="font-mono">
-                                      {msg.timestamp.toLocaleTimeString([], {
-                                        hour: "2-digit",
-                                        minute: "2-digit",
-                                      })}
-                                    </span>
-                                  </Tooltip>
-                                </div>
-                              )}
                             </div>
                           ) : (() => {
                             const messageToolGroups = entry.toolCallGroups;
@@ -6078,6 +6098,19 @@ function ChatInterface({
                             return (
                           <div className="min-w-0 w-full max-w-[860px] space-y-2">
                             <div className="group/agentMessage relative space-y-1.5">
+                              {startsAgentGroup && (
+                                <div className="flex items-baseline gap-2">
+                                  <span className="font-semibold text-[13px] text-kumo-default">{msg.author.name}</span>
+                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                    <span className="font-mono text-[11px] text-kumo-inactive">
+                                      {msg.timestamp.toLocaleTimeString([], {
+                                        hour: "2-digit",
+                                        minute: "2-digit",
+                                      })}
+                                    </span>
+                                  </Tooltip>
+                                </div>
+                              )}
                               {showReasoning && (
                                 <ThinkingTraceRow reasoning={msg.reasoning!} />
                               )}
@@ -6442,6 +6475,9 @@ function ChatInterface({
 
                       return (
                         <div className={`group/agent min-w-0 w-full max-w-[860px] space-y-2 ${provisionalTopClass}`}>
+                          <div className="flex items-baseline gap-2">
+                            <span className="font-semibold text-[13px] text-kumo-default">{activeAgent.name}</span>
+                          </div>
                           {isCompacting && (
                             <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
                               Compacting…
@@ -6539,18 +6575,18 @@ function ChatInterface({
                       const sameAuthorAsPrevious = steer.author.id === queuedSteers[index - 1]?.author.id;
                       const next = queuedSteers[index + 1];
                       return (
-                        <div key={index} className={`flex flex-col items-end ${sameAuthorAsPrevious ? "mt-2" : "mt-5"}`}>
+                        <div key={index} className={`flex flex-col items-start ${sameAuthorAsPrevious ? "mt-2" : "mt-5"}`}>
+                          {!sameAuthorAsPrevious && (
+                            <div className="mb-0.5 flex items-baseline gap-2">
+                              {!(hideOwnUserName && steer.author.id === currentUser?.id) && (
+                                <span className="font-semibold text-[13px] text-kumo-default">{steer.author.name}</span>
+                              )}
+                              {!next && <span className="text-[11px] text-kumo-inactive">Not read yet</span>}
+                            </div>
+                          )}
                           <div className={`${userBubbleClassName} opacity-60`}>
                             <MarkdownMessage message={steer.text} preserveLineBreaks />
                           </div>
-                          {next?.author.id !== steer.author.id && (
-                            <div className="mt-1 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive">
-                              {!(hideOwnUserName && steer.author.id === currentUser?.id) && (
-                                <span className="font-medium">{steer.author.name}</span>
-                              )}
-                              {!next && <span>Not read yet</span>}
-                            </div>
-                          )}
                         </div>
                       );
                     })}
