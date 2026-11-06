@@ -12,7 +12,7 @@ const CONTENT = `__typename
   ... on PullRequest { number title url repository { databaseId nameWithOwner } }
   ... on DraftIssue { title body }`;
 const ITEM = `id isArchived project { id } content { ${CONTENT} }`;
-const FIELD = `... on ProjectV2FieldCommon { id name dataType }
+const FIELD = `... on ProjectV2FieldCommon { id name dataType isIssueField }
   ... on ProjectV2SingleSelectField { options { id name } }
   ... on ProjectV2MultiSelectField { options { id name } }
   ... on ProjectV2IterationField { configuration {

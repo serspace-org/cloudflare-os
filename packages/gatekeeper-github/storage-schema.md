@@ -86,6 +86,13 @@ Stored action variants:
 - `createPullRequest`
 - `setTitle`
 - `setBody`
+- `setMilestone`, `setAssignees` (assignment actions)
+- `setProjectField` (pins project ID, item ID, field definition/type, validated new value,
+  and simulated previous value; always requires explicit approval). Before the first mutation,
+  `revertInfo: { type: "projectFieldAssignment", before, after, reverted? }` stores the actual
+  apply-time value durably. Retries and undo compare fresh provider values against these targets,
+  verify membership/type/options again, and refuse to overwrite a different value. No new KV
+  key families are needed. Project field listings overlay pending values, including unset fields.
 - `addLabels`
 - `removeLabels`
 - `changeState`

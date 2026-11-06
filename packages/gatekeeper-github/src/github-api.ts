@@ -698,12 +698,13 @@ export class GitHubApi {
   }
 
   /** GraphQL can return HTTP 200 with partial data and errors: never serve that as complete. */
-  async planningGraphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  async planningGraphql<T>(query: string, variables: Record<string, unknown>, write = false): Promise<T> {
+    const permission = write ? "project write permission (OAuth project scope)" : "project read permission";
     const response = await this.#request<{ data?: T; errors?: { type?: string }[] }>(
       "POST", "/graphql", { body: { query, variables } }).catch(error => {
       if (error instanceof GitHubApiError && error.status === 403 && !error.rateLimited) {
         throw new GitHubApiError(403,
-          "GitHub project access was denied. Reconnect GitHub with project read permission and check project access.");
+          `GitHub project access was denied. Reconnect GitHub with ${permission} and check project access.`);
       }
       throw error;
     });
@@ -712,7 +713,7 @@ export class GitHubApi {
       const denied = result.errors?.length && result.errors.every(error =>
         ["FORBIDDEN", "NOT_FOUND", "INSUFFICIENT_SCOPES"].includes(error.type ?? ""));
       throw new GitHubApiError(denied ? 403 : 502, denied
-        ? "GitHub project access was denied. Reconnect GitHub with project read permission and check project access."
+        ? `GitHub project access was denied. Reconnect GitHub with ${permission} and check project access.`
         : "GitHub could not return complete project data. Please retry.");
     }
     return result.data;
