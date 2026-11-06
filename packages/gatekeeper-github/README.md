@@ -7,7 +7,7 @@ This package provides GitHub OAuth integration for Gadgets. It serves two purpos
   to read the account's **primary verified email**, which becomes the user's identity. The sign-in
   grant is transient (discarded right after the email is read).
 - **Connections:** when a user connects GitHub (or signs in and later connects it), the full scopes
-  (`repo read:user user:email read:project`) are requested so gadgets can access repositories, issues, projects, and pull
+  (`repo read:user user:email project`) are requested so gadgets can access repositories, issues, projects, and pull
   requests on the user's behalf.
 
 > **Use a GitHub _OAuth App_, not a GitHub _App_.** Only OAuth Apps honor the OAuth `scope`
@@ -51,7 +51,7 @@ and iteration values. Built-in labels, assignees, milestone, and repository fiel
 the corresponding issue/PR details. Other field types are explicitly tagged `unsupported`, rather
 than silently omitted. Unset values are absent. Project reads only expose the connected issue or
 PR's memberships and fields; they do not grant access to other project items or draft issues.
-Project membership and field values remain read-only.
+Project membership remains read-only; issue/PR bindings can queue approved edits to existing items' custom field values (see below). Whole-project connections remain read-only.
 
 Existing OAuth connections must **reconnect** to grant `read:project` before reading projects.
 Ordinary issue, PR, and milestone reads do not require that scope. With a GitHub App, grant the
@@ -64,6 +64,59 @@ Sharing verifies project access separately from repository access. Each newly re
 tracked durably, including reads still awaiting authorization; existing observers are checked
 before disclosure, and new observers must be able to read every tracked project. Project pages
 are read fresh rather than cached, and every page is authorized before the cursor advances.
+
+## Editing project fields on issues and pull requests
+
+`setProjectField(itemId, fieldId, value)` stages a `github.setProjectField` action. It **always
+requires explicit approval**, even if other issue edit kinds are auto-approved. The approval
+shows the project/item/field identity, previous and new values, and option/iteration definitions.
+No mutation is sent until approval. Rejecting a change removes its simulated value; undo restores
+the actual apply-time value, including clearing a previously unset field.
+
+Use `listProjectFieldDefinitions(itemId)` to discover all definitions, including unset fields,
+select options and current/completed iteration IDs. Both discovery and mutation are scoped to
+an existing item belonging to the connected issue/PR. Repository connections expose these methods
+on issues/PRs opened with `getIssue()`/`getPullRequest()` too. Project and repository identities
+and item ownership are revalidated before writing and undoing. Project ACL observation checks
+apply to definitions, staged previous values and simulated reads.
+
+```ts
+using issue = await env.GITHUB_REPO.getIssue("42");
+// Obtain itemId from issue.listProjects(), and fieldId/optionId from definitions.
+await issue.setProjectField(itemId, fieldId, { kind: "singleSelect", optionId });
+await issue.setProjectField(itemId, estimateFieldId, { kind: "number", number: 3 });
+await issue.setProjectField(itemId, targetDateFieldId, { kind: "date", date: "2026-12-01" });
+await issue.setProjectField(itemId, notesFieldId, { kind: "text", text: "Ready for review" });
+await issue.setProjectField(itemId, teamsFieldId, { kind: "multiSelect", optionIds });
+await issue.setProjectField(itemId, sprintFieldId, { kind: "iteration", iterationId });
+await issue.setProjectField(itemId, fieldId, null); // clear
+await issue.setMilestone(3); // existing approval-gated milestone assignment
+await issue.setMilestone(null); // remove milestone
+```
+
+All six custom field types supported by GitHub's `updateProjectV2ItemFieldValue` mutation are
+supported: text, finite numbers, valid date-only dates, single-select (including Status/Priority),
+multi-select, and iteration. Option and iteration IDs must belong to the selected field. Empty
+multi-select sets clear the value. A `null` value uses `clearProjectV2ItemFieldValue`.
+
+Derived project columns are issue properties, not editable custom fields: use `setTitle()`,
+`setMilestone()`, `setAssignees()`, `addLabels()` and `removeLabels()` on the issue. Repository,
+reviewers, linked PRs, calculated progress/timestamps and organization issue fields are not writable
+through this method. It does not change project membership, field definitions, milestone metadata
+(title/description/due date), or project-wide settings. Newly created provisional issues must first
+exist on GitHub and be added to a project before project fields can be edited; milestone assignments
+still work on provisional issues as before.
+
+**Permissions:** existing OAuth connections with only `read:project` must reconnect to grant
+`project` for writes. New connections request `project`; read-only tokens can still read. A GitHub
+App needs Projects **read and write** permission configured in the App and reauthorized; OAuth
+scopes do not configure App permissions. The connected account must be allowed to edit the project.
+Approval cannot elevate GitHub permissions. Milestone assignment uses repository write access.
+
+Undo/retries retain durable apply-time state across restarts and lost mutation replies. A fresh
+read detects later external edits and refuses to overwrite them. GitHub provides no atomic
+compare-and-swap for field values, so an edit between that read and the mutation remains a provider
+limitation. Read-back verification reports provider no-ops as errors rather than success.
 
 ## Assigning milestones and assignees
 
@@ -143,7 +196,8 @@ opt in to approving a kind automatically on a connection. Every action is eligib
 closing and reopening, `requestChanges` reviews and force pushes, except those that pass a review
 gate or can start a billed run, which always wait for a person: **merging a pull request**, **an
 approving review**, **a push or force push to the repository's default branch or a protected
-branch**, and **creating an issue assigned to an app**. An approval shares
+branch**, and **creating an issue assigned to an app**, and **editing an issue's project field**. Project-field
+edits cross the repository/project permission boundary and always require explicit approval. An approval shares
 the `github.postReview` kind with comment and request-changes reviews, and a gated push shares
 `github.push` or `github.forcePush` with pushes to other branches, but neither is ever
 auto-approvable, so enabling those kinds does not cover them. Whether a branch is gated is read

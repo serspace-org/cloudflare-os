@@ -262,6 +262,20 @@ export interface GitHubIssue {
    */
   listProjectFields(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubProjectFieldValue>>;
 
+  /** List definitions, including options and iterations, for this issue's project item.
+   * Includes unset fields. The item must belong to this issue/PR on every page.
+   */
+  listProjectFieldDefinitions(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubIssueProjectField>>;
+
+  /** Queue an approval-gated change to a project field; null clears its value.
+   * Supports text, number, date, single-select (Status/Priority), multi-select and iteration.
+   * Use listProjectFieldDefinitions() for IDs/options. Requires project write permission
+   * (OAuth project scope; reconnect older connections). Only existing issue/PR memberships
+   * may be edited. Derived fields use setTitle/setMilestone/setAssignees/addLabels/removeLabels.
+   * Organization issue fields and calculated/read-only fields are not editable here.
+   */
+  setProjectField(itemId: string, fieldId: string, value: GitHubProjectFieldInput | null): Promise<void>;
+
   /** Returns the current issue metadata and body. */
   getDetails(): Promise<GitHubIssueDetails>;
 
@@ -762,6 +776,28 @@ export type GitHubProjectItem = {
     shortDescription: string | null;
     closed: boolean;
     public: boolean;
+  };
+};
+
+/** An editable project value. Exactly one typed value is supplied; null clears a field. */
+export type GitHubProjectFieldInput =
+  | { kind: "text"; text: string }
+  | { kind: "number"; number: number }
+  | { kind: "date"; date: string }
+  | { kind: "singleSelect"; optionId: string }
+  | { kind: "multiSelect"; optionIds: string[] }
+  | { kind: "iteration"; iterationId: string };
+
+/** A field definition scoped to a project containing the connected issue/PR. */
+export type GitHubIssueProjectField = {
+  id: string;
+  name: string;
+  dataType: string;
+  isIssueField?: boolean;
+  options?: { id: string; name: string }[];
+  configuration?: {
+    iterations: { id: string; title: string; startDate: string; duration: number }[];
+    completedIterations: { id: string; title: string; startDate: string; duration: number }[];
   };
 };
 

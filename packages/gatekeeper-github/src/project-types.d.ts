@@ -38,6 +38,7 @@ export type GitHubProjectField = {
   id: string;
   name: string;
   dataType: string;
+  isIssueField?: boolean;
   options?: { id: string; name: string }[];
   configuration?: {
     iterations: GitHubProjectIteration[];

@@ -101,6 +101,9 @@ import {
 import type { GitHubWebhookEvent } from "./github-webhook-events";
 import { assertIssueSearchResultsInRepo, buildIssueSearchQuery } from "./github-search";
 import { normalizeMilestone } from "./github-planning";
+import { projectFields } from "./github-project-api";
+import { issueProjectField, issueProjectValues, projectFieldValue, projectInput, sameProjectInput, validateProjectInput, writeProjectField } from "./github-project-edit";
+import type { GitHubIssueProjectField, GitHubProjectFieldInput } from "./types";
 import { PlanningCursor } from "./github-planning-cursor";
 import { parseRepoSubresource, repoSubresourceId } from "./repo-subresources";
 import {
@@ -298,6 +301,7 @@ type AssignmentRevertInfo =
   | { type: "assigneeAssignment"; before: string[]; after: string[]; reverted?: boolean };
 
 type GitHubRevertInfo =
+  | { type: "projectFieldAssignment"; before: GitHubProjectFieldInput | null; after: GitHubProjectFieldInput | null; reverted?: boolean }
   | AssignmentRevertInfo
   | {
       type: "issueComment";
@@ -360,6 +364,15 @@ type SetMilestoneAction = BaseEntityAction & {
   type: "setMilestone";
   milestone: GitHubMilestone | null;
   previousMilestone: number | null;
+};
+
+type SetProjectFieldAction = BaseEntityAction & {
+  type: "setProjectField";
+  projectId: string;
+  itemId: string;
+  field: GitHubIssueProjectField;
+  value: GitHubProjectFieldInput | null;
+  previousValue: GitHubProjectFieldInput | null;
 };
 
 type SetAssigneesAction = BaseEntityAction & {
@@ -447,6 +460,7 @@ type GitHubAction =
   | RemoveLabelsAction
   | ChangeStateAction
   | SetMilestoneAction
+  | SetProjectFieldAction
   | SetAssigneesAction
   | PostCommentAction
   | PostReviewAction
@@ -515,6 +529,15 @@ function describeGitHubAction(action: GitHubAction): RenderedDescription {
       return noteReferenceRewrite(
         buildDescription(`Replace the Markdown body of #${action.targetId}.`)
           .verbatim("New body", action.bodyMarkdown, "markdown"), action.bodyMarkdown)
+        .finish();
+    case "setProjectField":
+      return buildDescription(`Change a project field of #${action.targetId}.`)
+        .inline("Project ID", action.projectId)
+        .inline("Item ID", action.itemId)
+        .inline("Field", `${action.field.name} (${action.field.id})`)
+        .verbatim("Previous value", JSON.stringify(action.previousValue))
+        .verbatim("New value (null clears)", JSON.stringify(action.value))
+        .verbatim("Field options / iterations", JSON.stringify(action.field))
         .finish();
     case "setMilestone":
       return buildDescription(`Replace the milestone of #${action.targetId}.`)
@@ -618,6 +641,7 @@ const ACTION_KINDS = {
   createPullRequest: { tag: "github.createPullRequest", label: "Create pull requests" },
   setTitle: { tag: "github.setTitle", label: "Rename issues and pull requests" },
   setBody: { tag: "github.setBody", label: "Edit issue and pull request bodies" },
+  setProjectField: { tag: "github.setProjectField", label: "Edit issue project fields" },
   setMilestone: { tag: "github.setMilestone", label: "Assign or remove milestones" },
   setAssignees: { tag: "github.setAssignees", label: "Replace assignees" },
   addLabels: { tag: "github.addLabels", label: "Add labels" },
@@ -634,7 +658,8 @@ const ACTION_KINDS = {
 type AutoApprovalKind = keyof typeof ACTION_KINDS;
 
 // The auto-approvable kinds each binding's session can submit, so a pre-approval UI lists only
-// those its actions can carry. Merges never appear: they are never auto-approvable. Pushes do,
+// those its actions can carry. Merges and project-field edits never appear: they are never
+// auto-approvable. Pushes do,
 // though one to the default or a protected branch always waits for a person.
 const ISSUE_ACTIONS: AutoApprovalKind[] =
   ["setTitle", "setBody", "setMilestone", "setAssignees", "addLabels", "removeLabels", "changeState", "postComment"];
@@ -651,6 +676,7 @@ const BINDING_ACTIONS: Record<ResourceKind, AutoApprovalKind[]> = {
  * person: a merge, an approving review, and a push or force push to the default or a protected
  * branch. An approval shares its kind with the other reviews, and a gated push with the other
  * pushes, so enabling those kinds never covers them. So does an issue assigned to an app.
+ * Project-field edits also always require explicit approval across the project ACL boundary.
  */
 function autoApprovalOf(action: GitHubAction): Pick<ActionDescription, "actionKind" | "autoApprovable"> {
   const kind: AutoApprovalKind = action.type === "push" && action.force ? "forcePush" : action.type;
@@ -659,6 +685,7 @@ function autoApprovalOf(action: GitHubAction): Pick<ActionDescription, "actionKi
 
 function autoApprovable(action: GitHubAction): boolean {
   switch (action.type) {
+    case "setProjectField": return false;
     case "mergePullRequest": return false;
     case "postReview": return action.review.decision !== "approve";
     case "push": return action.gatedBranch === false;
@@ -725,7 +752,7 @@ const MAX_PENDING_CHAIN_COMMITS = 250;
 const GITHUB_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GITHUB_LOGO_SVG)}`;
 
 // `user:email` lets us read the account's primary verified email for sign-in (getAuthenticatedEmail).
-const OAUTH_SCOPES = ["repo", "read:user", "user:email", "read:project"];
+const OAUTH_SCOPES = ["repo", "read:user", "user:email", "project"];
 
 // Minimal scopes for sign-in only (verify the user's email). Used when connecting in "auth" mode;
 // the resulting grant is transient.
@@ -2833,6 +2860,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         return action.provisionalId === provisionalId;
       case "setTitle":
       case "setBody":
+      case "setProjectField":
       case "setMilestone":
       case "setAssignees":
       case "addLabels":
@@ -3019,6 +3047,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       switch (action.type) {
         case "setTitle":
         case "setBody":
+        case "setProjectField":
         case "setMilestone":
         case "setAssignees":
         case "addLabels":
@@ -4512,6 +4541,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "setProjectField":
+        await this.#writeProjectField(action, false);
+        return;
       case "setMilestone":
       case "setAssignees": {
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
@@ -4851,6 +4883,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "setProjectField":
+        await this.#writeProjectField(action, true);
+        return;
       case "setMilestone":
       case "setAssignees": {
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
@@ -4932,6 +4967,61 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           canRetry: false,
         };
     }
+  }
+
+  /** Serialize writes, persist undo before mutation, and recover from lost replies/restarts.
+   * GitHub has no CAS for project fields: a provider edit between the fresh read and mutation
+   * is still possible. Never knowingly overwrite a newer value during retry or undo.
+   */
+  async #writeProjectField(action: SetProjectFieldAction, revert: boolean): Promise<void> {
+    await this.#assignmentWrites.run(async () => {
+      const record = this.#requireActionRecord(action.approvalId);
+      if (!revert && record.state === "approved") return;
+      if (record.state === "rejected") throw new Error("This project field action was discarded.");
+      let info = record.revertInfo;
+      if (revert && info?.type !== "projectFieldAssignment") throw new Error("Missing project field undo state.");
+      if (info?.type === "projectFieldAssignment" && info.reverted) return;
+      const number = this.#planningNumber(action.targetKind, action.targetId);
+      if (number === undefined) throw new Error("The target has not been created on GitHub yet.");
+      const snapshot = await this.#readApi(api => issueProjectValues(api, number, action.targetKind, action.itemId));
+      if (snapshot.projectId !== action.projectId) throw new Error("The item no longer belongs to the approved project.");
+      const field = await this.#readApi(api => issueProjectField(api, action.projectId, action.field.id));
+      if (field.dataType !== action.field.dataType) throw new Error("Project field type changed; submit a new change.");
+      const current = projectInput(snapshot.values.find(value => value.field?.id === action.field.id)?.value);
+      if (!info) {
+        info = { type: "projectFieldAssignment", before: current, after: action.value };
+        record.revertInfo = info;
+        this.#putActionRecord(action.approvalId, record);
+      }
+      if (info.type !== "projectFieldAssignment") throw new Error("Invalid project field undo state.");
+      const desired = validateProjectInput(field, revert ? info.before : info.after);
+      if (!sameProjectInput(current, desired)) {
+        if (!sameProjectInput(current, revert ? info.after : info.before)) {
+          throw new Error("The project field changed on GitHub. Refusing to overwrite a newer value; review it and submit a new change.");
+        }
+        // Revalidate item ownership immediately before writing, not just when staged.
+        const membership = await this.#readApi(api => api.listIssueProjectFields(number, action.targetKind, action.itemId, 1));
+        if (membership.projectId !== action.projectId) throw new Error("Project membership changed before writing.");
+        try {
+          await this.#withApi(api => writeProjectField(api, action.projectId, action.itemId, action.field.id, desired));
+        } finally {
+          this.#clearCaches();
+        }
+        const result = await this.#readApi(api => issueProjectValues(api, number, action.targetKind, action.itemId));
+        if (result.projectId !== action.projectId || !sameProjectInput(
+          projectInput(result.values.find(value => value.field?.id === action.field.id)?.value), desired)) {
+          throw new Error("GitHub did not apply the requested project field value. Check project write access.");
+        }
+      }
+      if (revert) {
+        info.reverted = true;
+        record.revertInfo = info;
+        this.#putRetiredActionRecord(action.approvalId, record);
+      } else {
+        this.#markActionApproved(action, info);
+      }
+      this.#clearCaches();
+    });
   }
 
   /** Persist apply-time undo state before PATCH, retaining it across failures and lost replies. */
@@ -5042,12 +5132,53 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   async listIssueProjectFields(kind: EntityKind, id: string, itemId: string, pageSize: number,
     queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubProjectFieldValue>> {
     const ownedQueue = queue.dup();
+    // Pin cursor mode: an edit queued halfway through a remote cursor must not reinterpret
+    // GitHub's opaque pagination token as a simulated offset and repeat the first page.
+    const simulate = this.#pendingActionsForEntity(kind, id).some(action =>
+      action.type === "setProjectField" && action.itemId === itemId);
     return new PlanningCursor(async after => {
       const number = this.#planningNumber(kind, id);
       if (number === undefined) throw new Error("This issue or pull request has no project items yet.");
-      const page = await this.#readApi(api => api.listIssueProjectFields(number, kind, itemId, pageSize, after));
+      const pending = this.#pendingActionsForEntity(kind, id).filter((action): action is SetProjectFieldAction =>
+        action.type === "setProjectField" && action.itemId === itemId);
+      let page: { items: GitHubProjectFieldValue[]; next?: string; projectId: string };
+      if (simulate) {
+        const snapshot = await this.#readApi(api => issueProjectValues(api, number, kind, itemId));
+        const values = new Map(snapshot.values.map(value => [value.field?.id, value]));
+        for (const action of pending) {
+          if (action.projectId !== snapshot.projectId) continue;
+          if (action.value === null) values.delete(action.field.id);
+          else values.set(action.field.id, projectFieldValue(action.field, action.value));
+        }
+        // A pending mutation may introduce a previously unset field. Overlay the complete
+        // listing before slicing, rather than duplicating it on every upstream page.
+        const offset = after?.startsWith("sim:") ? Number(after.slice(4)) : 0;
+        const items = [...values.values()];
+        page = { projectId: snapshot.projectId, items: items.slice(offset, offset + pageSize),
+          next: offset + pageSize < items.length ? `sim:${offset + pageSize}` : undefined };
+      } else {
+        page = await this.#readApi(api => api.listIssueProjectFields(number, kind, itemId, pageSize, after));
+      }
       await this.authorizeProjectObservation(ownedQueue, [page.projectId],
         { title: `Read GitHub project fields for #${id}`, description: "Read a page of populated fields for this issue or pull request in a project." });
+      return page;
+    }, () => ownedQueue[Symbol.dispose]());
+  }
+
+  async listIssueProjectFieldDefinitions(kind: EntityKind, id: string, itemId: string, pageSize: number,
+    queue: RpcStub<ApprovalQueue>): Promise<Cursor<GitHubIssueProjectField>> {
+    const ownedQueue = queue.dup();
+    let projectId: string | undefined;
+    return new PlanningCursor(async after => {
+      const number = this.#planningNumber(kind, id);
+      if (number === undefined) throw new Error("This issue or pull request has no project items yet.");
+      const membership = await this.#readApi(api => api.listIssueProjectFields(number, kind, itemId, 1));
+      if (projectId && membership.projectId !== projectId) throw new Error("Project membership changed while paging field definitions.");
+      const page = await this.#readApi(api => projectFields(api, membership.projectId, pageSize, after));
+      await this.authorizeProjectObservation(ownedQueue, [membership.projectId], {
+        title: `Read project field definitions for #${id}`, description: "Read field definitions, options and iteration schedules for this issue's project item.",
+      });
+      projectId = membership.projectId;
       return page;
     }, () => ownedQueue[Symbol.dispose]());
   }
@@ -6471,6 +6602,27 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     };
   }
 
+  async prepareSetProjectField(targetKind: EntityKind, targetId: string, itemId: string,
+    fieldId: string, value: GitHubProjectFieldInput | null, queue: RpcStub<ApprovalQueue>): Promise<SetProjectFieldAction> {
+    const number = this.#planningNumber(targetKind, targetId);
+    if (number === undefined) throw new Error("This issue or pull request has no project items yet.");
+    const snapshot = await this.#readApi(api => issueProjectValues(api, number, targetKind, itemId));
+    await this.authorizeProjectObservation(queue, [snapshot.projectId], {
+      title: `Read project field for #${targetId}`, description: "Read the project field and its previous value before staging a change.",
+    });
+    const field = await this.#readApi(api => issueProjectField(api, snapshot.projectId, fieldId));
+    const input = validateProjectInput(field, value);
+    let previousValue = projectInput(snapshot.values.find(value => value.field?.id === fieldId)?.value);
+    for (const pending of this.#pendingActionsForEntity(targetKind, targetId)) {
+      if (pending.type === "setProjectField" && pending.itemId === itemId && pending.field.id === fieldId && pending.projectId === snapshot.projectId) {
+        previousValue = pending.value;
+      }
+    }
+    return { type: "setProjectField", approvalId: this.#nextActionId(), submittedAt: Date.now(),
+      owner: this.ctx.props.owner, repo: this.ctx.props.repo, targetKind, targetId,
+      projectId: snapshot.projectId, itemId, field, value: input, previousValue };
+  }
+
   async prepareSetMilestone(targetKind: EntityKind, targetId: string, number: number | null): Promise<SetMilestoneAction> {
     if (number !== null && (!Number.isSafeInteger(number) || number < 1)) throw new Error("Milestone number must be a positive integer.");
     const details = targetKind === "issue" ? await this.#getIssueDetails(targetId) : await this.#getPullRequestDetails(targetId);
@@ -7173,6 +7325,17 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
 
   async listProjectFields(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubProjectFieldValue>> {
     return this.gatekeeper.listIssueProjectFields(this.kind, this.logicalId, itemId, pageSizeOf(options), this.approvalQueue);
+  }
+
+  async listProjectFieldDefinitions(itemId: string, options?: GitHubPageOptions): Promise<Cursor<GitHubIssueProjectField>> {
+    return this.gatekeeper.listIssueProjectFieldDefinitions(this.kind, this.logicalId, itemId, pageSizeOf(options), this.approvalQueue);
+  }
+
+  async setProjectField(itemId: string, fieldId: string, value: GitHubProjectFieldInput | null): Promise<void> {
+    const action = await this.gatekeeper.prepareSetProjectField(this.kind, this.logicalId, itemId, fieldId, value, this.approvalQueue);
+    await this.gatekeeper.submitActionForApproval(this.approvalQueue, action, {
+      title: `Edit project field for #${this.logicalId}`, implementsRevert: true,
+    });
   }
 
   async getDetails(): Promise<GitHubIssueDetails> {
