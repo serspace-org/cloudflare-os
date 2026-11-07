@@ -86,11 +86,30 @@ describe("independent creation and connection discovery", () => {
     expect(await inUser(user => user.createResourceGatekeeper("example", CREATION.urlPattern, "Build")))
       .toMatchObject({ typeUrlPattern: CREATION.urlPattern, action: { title: "Create environment" } });
     expect(createResource).toHaveBeenCalledOnce();
+    expect(createResource).toHaveBeenCalledWith(CREATION.urlPattern, "Build");
+  });
+
+  it.each(["opaque://proposal/one?read=token#review", ""])(
+    "forwards opaque preparation input unchanged: %s", async creationInput => {
+      const { inUser, createResource } = fixture();
+      await inUser(user => user.createResourceGatekeeper(
+          "example", CREATION.urlPattern, "Build", creationInput));
+      expect(createResource).toHaveBeenCalledExactlyOnceWith(
+          CREATION.urlPattern, "Build", creationInput);
+    });
+
+  it("does not accept a proposal locator in place of the advertised pattern", async () => {
+    const { inUser, createResource } = fixture();
+    await expect(inUser(user => user.createResourceGatekeeper(
+        "example", "example://environment/proposal", "Build", "opaque-input")))
+      .rejects.toThrow("does not advertise creation");
+    expect(createResource).not.toHaveBeenCalled();
   });
 
   it("does not infer creation support from an existing resource type", async () => {
     const { inUser, createResource } = fixture([EXISTING]);
-    await expect(inUser(user => user.createResourceGatekeeper("example", EXISTING.urlPattern, "Doc")))
+    await expect(inUser(user => user.createResourceGatekeeper(
+        "example", EXISTING.urlPattern, "Doc", "opaque-input")))
       .rejects.toThrow("does not advertise creation");
     expect(createResource).not.toHaveBeenCalled();
   });
@@ -99,7 +118,8 @@ describe("independent creation and connection discovery", () => {
     const { inUser, createResource } = fixture([CREATION], {
       disabledResources: { example: [CREATION.urlPattern] },
     });
-    await expect(inUser(user => user.createResourceGatekeeper("example", CREATION.urlPattern, "Build")))
+    await expect(inUser(user => user.createResourceGatekeeper(
+        "example", CREATION.urlPattern, "Build", "opaque-input")))
       .rejects.toThrow("disabled");
     expect(createResource).not.toHaveBeenCalled();
   });
@@ -110,7 +130,8 @@ describe("independent creation and connection discovery", () => {
       class: {} as DurableObjectClass<Gatekeeper<unknown>>, resource: EXISTING,
       action: { title: "Create document", description: "Wrong resource type" },
     });
-    await expect(inUser(user => user.createResourceGatekeeper("example", CREATION.urlPattern, "Build")))
+    await expect(inUser(user => user.createResourceGatekeeper(
+        "example", CREATION.urlPattern, "Build", "opaque-input")))
       .rejects.toThrow("does not match");
   });
 
@@ -124,6 +145,40 @@ describe("independent creation and connection discovery", () => {
     }]);
     expect(view.resourceVendors[0]).toHaveProperty("resources.length", 2);
   });
+});
+
+describe("Overseer creation preparation", () => {
+  it.each([undefined, "opaque://proposal/one?read=token#review", ""])(
+    "forwards preparation input while still queuing creation: %s", async creationInput => {
+      const stub = env.TEST_OVERSEER.getByName(`creation-forwarding-${++counter}`);
+      await runInDurableObject(stub, async instance => {
+        const impl = (instance as unknown as { impl: any }).impl;
+        const action = { title: "Review creation", description: "Prepared proposal",
+          autoApprovable: false };
+        const createResourceGatekeeper = vi.fn(async () => ({
+          class: {}, typeUrlPattern: CREATION.urlPattern, action,
+        }));
+        impl.ownerId = "owner";
+        impl.users = { idFromString: (id: string) => id,
+          get: () => ({ createResourceGatekeeper }) };
+        // Keep the actual Overseer mint/storage path; isolate the existing action dispatcher.
+        impl.submitAction = vi.fn(async () => {});
+        const result = await impl.createExternalResource(1, {
+          vendorId: "example", resourceUrlPattern: CREATION.urlPattern, title: "Build",
+          bindingName: "BUILD", ...(creationInput === undefined ? {} : { creationInput }),
+        });
+        expect(createResourceGatekeeper.mock.calls).toEqual([
+          ["example", CREATION.urlPattern, "Build",
+            ...(creationInput === undefined ? [] : [creationInput])],
+        ]);
+        expect(impl.storage.gatekeepers.get(result.gatekeeperId)).toMatchObject({
+          resourceTitle: "Build", creationSpec: { type: "gatekeeper", vendorId: "example",
+            typeUrlPattern: CREATION.urlPattern },
+        });
+        expect(impl.submitAction).toHaveBeenCalledExactlyOnceWith(
+            result.gatekeeperId, "create", action, { from: "agent", chatId: 1 });
+      });
+    });
 });
 
 describe("agent resource discovery", () => {

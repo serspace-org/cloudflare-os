@@ -5012,6 +5012,9 @@ export type AiToolCall = {
     /** Title of the new resource, e.g. a document's title. */
     title: string;
 
+    /** Opaque vendor-defined read-only preparation input, not a resource type or approval. */
+    creationInput?: string;
+
     /** Name under which the resource appears in the chat's env (see validateBindingName()). */
     bindingName: string;
   };

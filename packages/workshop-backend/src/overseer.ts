@@ -9972,7 +9972,8 @@ class OverseerImpl implements AgentHooks {
       chatId: number, input: Extract<AiToolCall, {toolName: "createExternalResource"}>["input"])
       : Promise<{gatekeeperId: WorkpieceId}> {
     let minted = await this.#ownerUserStub().createResourceGatekeeper(
-        input.vendorId, input.resourceUrlPattern, input.title);
+        input.vendorId, input.resourceUrlPattern, input.title,
+        ...(input.creationInput === undefined ? [] : [input.creationInput]));
     let id = this.allocateWorkpieceId();
     this.storage.gatekeepers.put({
       id,

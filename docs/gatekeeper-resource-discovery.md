@@ -34,3 +34,22 @@ still needs approval and a chosen account; advertising creation creates or conne
 Workshop filters resource types through deployment policy and checks the advertised creation type
 and policy before minting its simulated gatekeeper. Existing-resource pickers and connection
 request resolution exclude types marked `connectable: false`.
+
+### Optional preparation input
+
+`createExternalResource` accepts `creationInput?: string` in addition to `vendorId`,
+`resourceUrlPattern`, `title`, and `bindingName`. Workshop forwards the string unchanged through
+the Overseer and User DO to `GatekeeperVendor.createResource(resourceUrlPattern, title,
+creationInput?)`. When it is omitted, the vendor still receives exactly two arguments, preserving
+compatibility with existing RPC implementations.
+
+The string is opaque to Workshop. A vendor may use it as a locator for read-only preparation of
+a frozen proposal and its review card. It is **not approval**, user identity, an account selector,
+or permission to publish. Vendors must validate their input without external writes and continue
+enforcing selected-account authorization when the approved creation is applied. Do not log the
+opaque input or include it in error messages.
+
+Keep `resourceUrlPattern` equal to the exact advertised creatable type; do not substitute a
+concrete proposal locator. Admin policy and the returned resource-type equality check still use
+that advertised pattern. This parameter does not change connection selection, observer checks,
+approval behavior, or existing action authority.

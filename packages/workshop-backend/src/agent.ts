@@ -3951,6 +3951,10 @@ async function runAgentPass(
         title: Type.String({
           description: "Title of the new resource, e.g. the document's title.",
         }),
+        creationInput: Type.Optional(Type.String({
+          description: "Opaque vendor-defined read-only preparation input, such as a proposal " +
+              "locator. Not a resource URL pattern or approval; use only as the vendor directs.",
+        })),
         bindingName: Type.String({
           description:
               "Name under which the new resource appears in your env. Must be a JavaScript " +

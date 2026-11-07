@@ -2836,7 +2836,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * GatekeeperVendor.createResource()). It belongs to no account; the returned `action` is the
    * creation to queue.
    */
-  async createResourceGatekeeper(vendorId: string, resourceUrlPattern: string, title: string)
+  async createResourceGatekeeper(
+      vendorId: string, resourceUrlPattern: string, title: string, creationInput?: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, typeUrlPattern: string,
                   action: ActionDescription}> {
     let vendor = this.vendors.get(vendorId);
@@ -2848,8 +2849,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           "Call listConnectableResources to see the available creations.");
     }
     await this.#assertResourceEnabled(vendorId, advertised);
-    let {class: cls, resource, action} = await (vendor as unknown as ResourceCreatorStub)
-        .createResource(resourceUrlPattern, title);
+    let creator = vendor as unknown as ResourceCreatorStub;
+    let {class: cls, resource, action} = await (creationInput === undefined
+        ? creator.createResource(resourceUrlPattern, title)
+        : creator.createResource(resourceUrlPattern, title, creationInput));
     if (resource.urlPattern !== resourceUrlPattern) {
       throw new Error("Created resource type does not match the requested type.");
     }

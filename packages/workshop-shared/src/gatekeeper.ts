@@ -721,8 +721,14 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * ObservationDescription.subresources).
    * Present only on vendors with a `creatable` resource type. The `action` (the creation card) sets
    * `autoApprovable: false`: approving it means choosing the account to create the resource in.
+   *
+   * `creationInput`, when supplied, is an opaque vendor-defined string for read-only preparation
+   * (for example, a frozen proposal locator), not a resource type, user identity or approval.
+   * The vendor must validate it without creating external effects; applying the returned action
+   * still requires the existing selected-account approval and authorization checks. Omitted input
+   * is sent as the original two-argument call for compatibility with older vendors.
    */
-  createResource?(resourceUrlPattern: string, title: string): Promise<{
+  createResource?(resourceUrlPattern: string, title: string, creationInput?: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
     action: ActionDescription;
