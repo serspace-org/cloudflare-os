@@ -121,7 +121,9 @@ import {
 import { SessionGitCache } from "@gadgets/gatekeeper-kit/cursors";
 import {
   advertisePages,
+  bufferedGitObject,
   commitIdsOfSummary,
+  gitObjectBytes,
   isCommitOid,
   parseGitCommitPayload,
 } from "@gadgets/gatekeeper-kit/git-objects";
@@ -1588,6 +1590,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 const REPO_ACCESS_ALLOWED_TTL_MS = 15 * 60_000;
 const REPO_ACCESS_DENIED_TTL_MS = 15_000;
 
+// How long a binding reuses its owner's answer that the bound repository is public, or not. A
+// repository made private is treated as public by observer checks for at most this long.
+const REPO_VISIBILITY_TTL_MS = 15 * 60_000;
+
 /**
  * Stands in for the identity of a token the account no longer serves, so the coordinator's
  * moved-past gate adjudicates it. Never equal to a real identity, which is a hex nonce.
@@ -2150,6 +2156,15 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
    * ids, so a restart cannot leak an unfiltered id.
    */
   #servedSimulatedCommitIds = new Set<GitOid>();
+
+  /**
+   * Whether the bound repository is public, as its owner's account last found it (see
+   * #reportsPublicRepo). Each answer is dated from when its request started and overlapping checks
+   * share one request, so a late answer can't outlast a newer one. Visibility is the repository's
+   * own, whoever asks, so the cache needs no partition by connection.
+   */
+  readonly #repoVisibility = new KvTtlCache(this.ctx.storage.kv, () => "repo",
+    { name: "repo-visibility" });
 
   constructor(ctx: DurableObjectState<GitHubGatekeeperImplProps>, env: Env) {
     super(ctx, env);
@@ -5415,11 +5430,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       if (pending.length === MAX_PENDING_CHAIN_COMMITS) {
         throw new Error(`More than ${MAX_PENDING_CHAIN_COMMITS} commits are queued for push.`);
       }
-      const object = await gitCache.get(current);
-      if (object === null || object.type !== "commit") {
+      const payload = await gitObjectBytes(await gitCache.get(current), "commit");
+      if (payload === null) {
         throw new Error(`Commit ${current} is not available from the workspace git cache.`);
       }
-      const parsed = parseGitCommitPayload(object.content, current);
+      const parsed = parseGitCommitPayload(payload, current);
       this.#servedSimulatedCommitIds.add(current);
       pending.push(current);
       if (anchor === undefined) {
@@ -5428,7 +5443,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         }
         commits.push({
           summary: commitDetailsFromGitObject(
-            current, object.content, canonicalRepoUrl(this.ctx.props.owner, this.ctx.props.repo)),
+            current, payload, canonicalRepoUrl(this.ctx.props.owner, this.ctx.props.repo)),
           tree: parsed.tree,
         });
       }
@@ -5439,10 +5454,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
   /** The tree oid of a commit, from cached bytes when available, else GitHub's commit API. */
   async #treeOidOfCommit(gitCache: RpcStub<GitCache>, sha: GitOid): Promise<GitOid> {
-    const object = await gitCache.get(sha);
-    if (object !== null && object.type === "commit") {
-      return parseGitCommitPayload(object.content, sha).tree;
-    }
+    const payload = await gitObjectBytes(await gitCache.get(sha), "commit");
+    if (payload !== null) return parseGitCommitPayload(payload, sha).tree;
     return await this.#cachedRead(this.#cacheKey("commit-tree", sha), ENTITY_CACHE_TTL_MS, async () => {
       const result = await this.#withApi(api =>
         api.getCommitConditional(this.ctx.props.owner, this.ctx.props.repo, sha));
@@ -5463,17 +5476,16 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const { owner, repo } = this.ctx.props;
     return {
       getTree: async oid => {
-        const object = await gitCache.get(oid);
-        if (object !== null && object.type === "tree") {
-          return parseGitTreePayload(object.content, oid);
-        }
+        const payload = await gitObjectBytes(await gitCache.get(oid), "tree");
+        if (payload !== null) return parseGitTreePayload(payload, oid);
         const remote = await this.#withApi(api => api.getGitTree(owner, repo, oid));
         if (remote === null || remote.truncated) return null;
         return remote.tree.map(entry => ({ mode: entry.mode, name: entry.path, oid: entry.sha }));
       },
       getBlob: async oid => {
-        const object = await gitCache.get(oid);
-        if (object !== null && object.type === "blob") return object.content;
+        const cached = bufferedGitObject(await gitCache.get(oid), "blob");
+        // A streamed blob is over MAX_DIFF_BLOB_BYTES, so the diff would omit it anyway.
+        if (cached !== null) return cached === "streamed" ? "unavailable" : cached;
         const remote = await this.#withApi(api =>
           api.getGitBlob(owner, repo, oid, MAX_DIFF_BLOB_BYTES));
         return remote === null || remote === "oversized" ? "unavailable" : remote;
@@ -5641,10 +5653,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   async #tryReadCachedCommitDetails(
     gitCache: RpcStub<GitCache>, oid: string,
   ): Promise<GitHubCommitDetails | null> {
-    const object = await gitCache.get(oid);
-    if (object === null || object.type !== "commit") return null;
+    const payload = await gitObjectBytes(await gitCache.get(oid), "commit");
+    if (payload === null) return null;
     return commitDetailsFromGitObject(
-      oid, object.content, canonicalRepoUrl(this.ctx.props.owner, this.ctx.props.repo));
+      oid, payload, canonicalRepoUrl(this.ctx.props.owner, this.ctx.props.repo));
   }
 
   async listBranches(filter: GitHubBranchFilter | undefined, pageSize: number): Promise<Cursor<GitHubBranchSummary>> {
@@ -5841,8 +5853,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       if (simulated !== null && simulated !== realHead) {
         // Confirm the commit is actually served by the cache's scoped view (as getCommit does)
         // before answering with an id GitHub does not know.
-        const object = await gitCache.get(simulated);
-        if (object !== null && object.type === "commit") {
+        if ((await gitCache.stat(simulated))?.type === "commit") {
           return { id: simulated, fromCache: true };
         }
       }
@@ -5860,8 +5871,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       // getCommit, GitHub's unknown-full-commit-id answer is 422, not 404; accept both.
       if (gitCache !== undefined && isCommitOid(ref) &&
           error instanceof GitHubApiError && (error.status === 404 || error.status === 422)) {
-        const object = await gitCache.get(ref);
-        if (object !== null && object.type === "commit") return { id: ref, fromCache: true };
+        if ((await gitCache.stat(ref))?.type === "commit") return { id: ref, fromCache: true };
       }
       throw error;
     }
@@ -6938,15 +6948,49 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
   /**
    * Checks the repository subresources this binding's reads report (see authorizeRead), failing
-   * the whole call for any other ID. An observer is allowed when their own account can read each
-   * repository, as their UserAccount last learned (see UserAccount.checkSubresourceAccess).
+   * the whole call for any other ID. A public repository allows every observer, so their own
+   * accounts aren't asked, and one whose credentials have expired doesn't refuse a read anyone could
+   * make (see #reportsPublicRepo). Otherwise an observer is allowed when their own account can read
+   * each repository, as their UserAccount last learned (see UserAccount.checkSubresourceAccess).
    */
   async verifyObserverAccess(
     observers: { id: string; verifier: Fetcher<GatekeeperUserVerifier> }[],
     subresources: string[],
   ): Promise<{ allowedObserverIds: string[] }> {
-    for (const subresource of subresources) parseRepoSubresource(subresource);
+    const repoIds = subresources.map(parseRepoSubresource);
+    if (await this.#reportsPublicRepo(repoIds)) {
+      return { allowedObserverIds: observers.map(({ id }) => id) };
+    }
     return await verifyRepoAccess(observers, subresources);
+  }
+
+  /**
+   * Whether `repoIds` name only the repository this binding is pinned to, and its owner's account
+   * finds it public now, reusing an answer for up to REPO_VISIBILITY_TTL_MS from when its request
+   * started. Visibility is the repository's own, whoever's token reads it, and every read through
+   * the binding uses the owner's token, so that token has just worked whenever a read is checked.
+   * Anything else -- no pin, another repository, a private or internal one, or an answer that says
+   * nothing either way (expired owner credentials, a rate limit, an outage), which is not cached --
+   * is false, leaving observers to their own accounts. Never pins: the pin is taken by the first
+   * read, before any read can be checked.
+   */
+  async #reportsPublicRepo(repoIds: number[]): Promise<boolean> {
+    const id = this.ctx.storage.kv.get<number>("repoId");
+    if (id === undefined || repoIds.length === 0 || !repoIds.every(repoId => repoId === id)) return false;
+    try {
+      return await this.#repoVisibility.cached(String(id), REPO_VISIBILITY_TTL_MS, async () => {
+        const result = await withAccountApi(this.#userAccount(),
+          api => api.getRepoByIdConditional(id), { replayable: true });
+        if (result.status !== 200 || result.data.id !== id) {
+          throw new Error(`GitHub answered for repository ${id} with another.`);
+        }
+        return result.data.visibility === "public" && result.data.private === false;
+      });
+    } catch (error) {
+      logger.warn("could not learn whether the GitHub repository is public; checking observers' accounts",
+        { event: "observers.public_check.failed", error });
+      return false;
+    }
   }
 }
 
