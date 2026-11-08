@@ -835,13 +835,21 @@ describe("search", () => {
   });
 
   it("lists the open container when a search finds it, as a pasted link to it would", async () => {
-    await render({ loadItems: source({ reports: [reports] }), searchPlaceholder: "Search Drive" });
+    const results = Promise.withResolvers<ConfiguratorUIHierarchyPage>();
+    const loadItems = source();
+    await render({
+      loadItems: request => request.query ? results.promise : loadItems(request),
+      searchPlaceholder: "Search Drive",
+    });
     await userEvent.click(option("Reports"));
     await expect.element(option("Everything in Reports")).toBeVisible();
 
     await userEvent.fill(page.getByRole("searchbox", { name: "Search Drive" }), "reports");
     await expect.element(list()).toHaveAccessibleName("Search results");
-    expect(page.getByRole("option").elements().map(row => row.textContent)).toEqual(["Reports"]);
+    // The query changes the label before its asynchronous listing has arrived.
+    expect(page.getByRole("option").elements()).toEqual([]);
+    results.resolve({ items: [reports] });
+    await expect.poll(() => page.getByRole("option").elements().map(row => row.textContent)).toEqual(["Reports"]);
   });
 
   it("tells same-named results apart by where they live and what they say of themselves", async () => {
