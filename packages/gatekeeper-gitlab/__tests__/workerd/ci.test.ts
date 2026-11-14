@@ -1019,12 +1019,15 @@ describe("what CI reads disclose to observers", () => {
       expect((await hooks().queueLog(name)).subresources.at(-1)).toEqual([MAINTAINER]);
     });
 
+  // 51 sequential admissions, each a round trip through workerd: past the 5-second default on a
+  // loaded CI runner, where this was the only test in the suite to time out. Explicit limit rather
+  // than a raised default, as `push.test.ts` does for its own long journey.
   it("shares a binding with up to 50 collaborators", async () => {
     const names = Array.from({ length: 51 }, (_, i) => `member${i}`);
     const { props, name } = await setup(gateFake(), Object.fromEntries(names.map(member => [member, 20])));
     for (const member of names.slice(0, 50)) await observer(name, props, member);
     await expect(observer(name, props, names[50]!)).rejects.toThrow(/already answers for 50 collaborators/);
-  });
+  }, 30_000);
 
   describe("after CI data an earlier version marked", () => {
     // Those versions marked the binding when it read job logs or test reports, and checked every
