@@ -959,6 +959,79 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/pagerduty"
       }
     },
+    "gatekeeper-salesforce": {
+      "bindings": [
+        {
+          "name": "CLIENT_ID",
+          "text": "$SECRET(CLIENT_ID)",
+          "type": "secret_text"
+        },
+        {
+          "name": "CLIENT_SECRET",
+          "text": "$SECRET(CLIENT_SECRET)",
+          "type": "secret_text"
+        }
+      ],
+      "compatibilityDate": "2026-09-04",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "nodejs_als"
+      ],
+      "inputs": [
+        {
+          "consoleUrl": "https://login.salesforce.com/lightning/setup/NavigationMenus/home",
+          "help": "Create the Connected App in the Salesforce org that will host it. To connect sandboxes instead of production, also set the worker's SALESFORCE_LOGIN_URL to https://test.salesforce.com.",
+          "kind": "secret",
+          "label": "Connected App consumer key",
+          "name": "CLIENT_ID",
+          "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/salesforce/oauth",
+          "setupSteps": [
+            "In Salesforce Setup, open App Manager and create a New Connected App with OAuth enabled.",
+            "Set the Callback URL to the value below.",
+            "Select the OAuth scopes: Manage user data via APIs (api), Perform requests at any time (refresh_token, offline_access), and Access the identity URL service (id, profile, email).",
+            "Leave 'Require Proof Key for Code Exchange (PKCE)' enabled and uncheck 'Require Secret for Web Server Flow' only if your org policy demands it.",
+            "Save, wait for the app to propagate (up to 10 minutes), then copy the Consumer Key and Consumer Secret here."
+          ]
+        },
+        {
+          "kind": "secret",
+          "label": "Connected App consumer secret",
+          "name": "CLIENT_SECRET"
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "salesforce.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "UserAccount",
+            "SalesforceGatekeeperImpl"
+          ],
+          "tag": "v0"
+        }
+      ],
+      "modules": [
+        {
+          "name": "salesforce.js",
+          "r2Key": "blobs/modules/0ca63938908987fbda90c364cfcbf8fe7aafbe666735e08c7ec972808b3e6740",
+          "sha256": "0ca63938908987fbda90c364cfcbf8fe7aafbe666735e08c7ec972808b3e6740",
+          "size": 63,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "salesforce",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/salesforce"
+      }
+    },
     "gatekeeper-scheduler": {
       "bindings": [],
       "compatibilityDate": "2026-09-04",

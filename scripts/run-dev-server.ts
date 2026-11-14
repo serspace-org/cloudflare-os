@@ -498,6 +498,7 @@ const SHARED_GATEKEEPER_CREDS: Record<string, { id: string; secret: string }> = 
   "gatekeeper-x": { id: "X_CLIENT_ID", secret: "X_CLIENT_SECRET" },
   "gatekeeper-microsoft": { id: "MICROSOFT_CLIENT_ID", secret: "MICROSOFT_CLIENT_SECRET" },
   "gatekeeper-pagerduty": { id: "PAGERDUTY_CLIENT_ID", secret: "PAGERDUTY_CLIENT_SECRET" },
+  "gatekeeper-salesforce": { id: "SALESFORCE_CLIENT_ID", secret: "SALESFORCE_CLIENT_SECRET" },
 };
 
 // Deployment-configured vars a gatekeeper reads that its committed `wrangler.jsonc` deliberately
@@ -524,6 +525,10 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
   "gatekeeper-pagerduty": ["PAGERDUTY_WEBHOOK_SECRET"],
   // The most Google Drive connections may do; unset, read and write.
   "gatekeeper-google": ["GOOGLE_DRIVE_ACCESS"],
+  // The Salesforce login host accounts authorize against; unset, production (set
+  // https://test.salesforce.com to connect sandboxes). API calls go to each account's own
+  // instance_url either way.
+  "gatekeeper-salesforce": ["SALESFORCE_LOGIN_URL"],
   // The Entra tenant (or allowlist of tenant IDs) to accept, which must be set or the gatekeeper
   // refuses to start, the most agents may do in SharePoint, Outlook and Calendar (unset: write, send
   // and schedule), and whether SharePoint asks for every site or only those granted to the app
