@@ -230,6 +230,9 @@ Each gatekeeper package contains instructions for how to set it up:
 
 ## Developing
 
+For a concise repository map and Serspace contribution workflow, see the
+[codebase guide](docs/codebase-guide.md).
+
 Use Node >=24.19.0 and pnpm 11.17.0, then install with `pnpm install --frozen-lockfile`.
 Run `pnpm lint` and `pnpm test` for workspace verification. See
 [nested gatekeeper app routing](docs/gatekeeper-app-routing.md) for the optional app navigation
