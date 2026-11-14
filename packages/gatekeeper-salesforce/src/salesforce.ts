@@ -60,7 +60,6 @@ import type {
 import TYPES_CODE from "./types.txt";
 import SALESFORCE_LOGO_SVG from "./salesforce-logo.svg";
 import {
-  API_VERSION,
   DEFAULT_LOGIN_URL,
   OAUTH_SCOPES,
   SalesforceApi,
@@ -792,18 +791,9 @@ type SalesforceGatekeeperImplProps = {
   recordId?: string;
 };
 
+@validateRpc()
 export class SalesforceGatekeeperImpl extends DurableObject<Env, SalesforceGatekeeperImplProps>
     implements Gatekeeper<SalesforceOrg | SalesforceObject | SalesforceRecord> {
-
-  #account(): AccountStub {
-    return this.ctx.exports.UserAccount.get(
-      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
-  }
-
-  #run<T>(fn: (api: SalesforceApi) => Promise<T>): Promise<T> {
-    const account = this.#account();
-    return withRefresh(account, () => fn(apiFor(account, this.ctx.props.instanceUrl)));
-  }
 
   async describe(): Promise<ResourceDescription> {
     const { orgId, objectName, recordId, resourceKind } = this.ctx.props;
@@ -889,10 +879,6 @@ export class SalesforceGatekeeperImpl extends DurableObject<Env, SalesforceGatek
     return recordSubresourceId(this.ctx.props.orgId, objectName, toCaseSafeId(recordId));
   }
 
-  run<T>(fn: (api: SalesforceApi) => Promise<T>): Promise<T> {
-    return this.#run(fn);
-  }
-
   async applyAction(actionId: number): Promise<void> {
     // TODO(phase 2): look the action up in this binding's own storage and perform it.
     throw new Error(`Unknown action: ${actionId}`);
@@ -946,10 +932,12 @@ export class SalesforceGatekeeperImpl extends DurableObject<Env, SalesforceGatek
 // Sessions
 //
 // SCAFFOLDING: each method below is a stub. Implementing one means fetching through
-// `gatekeeper.run()`, then awaiting `gatekeeper.authorizeRead()` with the subresources the answer
-// depends on before returning anything — the org for org-wide metadata and listings, the object for
-// a listing or search over it, and each record whose data the answer carries.
+// `withRefresh(account, () => apiFor(account, instanceUrl)...)`, then awaiting
+// `gatekeeper.authorizeRead()` with the subresources the answer depends on before returning
+// anything — the org for org-wide metadata and listings, the object for a listing or search over
+// it, and each record whose data the answer carries.
 
+@validateRpc()
 class SalesforceOrgSession extends RpcTarget implements SalesforceOrg {
   constructor(
     private readonly gatekeeper: SalesforceGatekeeperImpl,
@@ -987,6 +975,7 @@ class SalesforceOrgSession extends RpcTarget implements SalesforceOrg {
   }
 }
 
+@validateRpc()
 class SalesforceObjectSession extends RpcTarget implements SalesforceObject {
   constructor(
     private readonly gatekeeper: SalesforceGatekeeperImpl,
@@ -1017,6 +1006,7 @@ class SalesforceObjectSession extends RpcTarget implements SalesforceObject {
   }
 }
 
+@validateRpc()
 class SalesforceRecordSession extends RpcTarget implements SalesforceRecord {
   constructor(
     private readonly gatekeeper: SalesforceGatekeeperImpl,
@@ -1066,5 +1056,3 @@ class SalesforceRecordSession extends RpcTarget implements SalesforceRecord {
     notYetImplemented("SalesforceRecord.addNote");
   }
 }
-
-export { API_VERSION };
