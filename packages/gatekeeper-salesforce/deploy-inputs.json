@@ -1,0 +1,22 @@
+[
+  {
+    "name": "CLIENT_ID",
+    "kind": "secret",
+    "label": "Connected App consumer key",
+    "help": "Create the Connected App in the Salesforce org that will host it. To connect sandboxes instead of production, also set the worker's SALESFORCE_LOGIN_URL to https://test.salesforce.com.",
+    "consoleUrl": "https://login.salesforce.com/lightning/setup/NavigationMenus/home",
+    "setupSteps": [
+      "In Salesforce Setup, open App Manager and create a New Connected App with OAuth enabled.",
+      "Set the Callback URL to the value below.",
+      "Select the OAuth scopes: Manage user data via APIs (api), Perform requests at any time (refresh_token, offline_access), and Access the identity URL service (id, profile, email).",
+      "Leave 'Require Proof Key for Code Exchange (PKCE)' enabled and uncheck 'Require Secret for Web Server Flow' only if your org policy demands it.",
+      "Save, wait for the app to propagate (up to 10 minutes), then copy the Consumer Key and Consumer Secret here."
+    ],
+    "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/salesforce/oauth"
+  },
+  {
+    "name": "CLIENT_SECRET",
+    "kind": "secret",
+    "label": "Connected App consumer secret"
+  }
+]
