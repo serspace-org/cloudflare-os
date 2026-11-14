@@ -10,6 +10,8 @@ review of the agent-facing API before it is implemented (Step 3). That API is
 [`src/types.d.ts`](src/types.d.ts), and the [open questions](#open-questions-for-review) below are
 what the review should settle.
 
+This scaffold is not production-ready; passing CI does not mean the Session API is implemented.
+
 ## Relationship to PR #76
 
 [cloudflare/cloudflare-os#76](https://github.com/cloudflare/cloudflare-os/pull/76) attempted a
