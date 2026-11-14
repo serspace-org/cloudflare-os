@@ -6,6 +6,7 @@ import tsconfigPaths from 'vite-tsconfig-paths'
 import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
 import { vitestTask } from '@gadgets/scripts/vitest-task'
 import capnwebValidate from 'capnweb-validate/vite'
+import { pdfjsAssets } from './vite-pdfjs-assets'
 
 // `dist/` is this package's own build output, excluded from the inputs of the bundle and test
 // tasks: vp declines to cache a task that reads a path it also wrote. Package-relative rather than
@@ -81,6 +82,7 @@ export default defineConfig(({ mode }) => {
       react(),
       tailwindcss(),
       tsconfigPaths(),
+      pdfjsAssets(),
     ],
     server: {
       port: 3000,
