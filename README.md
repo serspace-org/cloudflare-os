@@ -2,8 +2,6 @@
 
 Cloudflare OS is an "operating system" for AI productivity originally developed for use inside Cloudflare. A large portion of Cloudflare's workforce -- from engineering to sales and everything in between -- uses Cloudflare OS every day to help them do their jobs.
 
-![A Q3 planning workspace in Cloudflare OS, with an AI-generated slide deck](docs/images/q3-planning-workspace.png)
-
 This is not a traditional computer operating system. We use the term "operating system" in two senses:
 
 * An operating system for *the company* to be productive with AI, in a way that is safe, so that the security team can sleep at night.
@@ -16,6 +14,16 @@ Cloudflare OS provides three things in particular:
 3. A security framework, called Gatekeepers, that applies guardrails to both agents and apps such that non-technical users can safely "go nuts" and nothing bad will happen.
 
 We are making Cloudflare OS open source so that others can copy it and customize it for their own company. The idea is not that your company uses Cloudflare OS, but rather that you make it "*Your Company* OS".
+
+## About this fork: the `serspace` branch
+
+This repository is Serspace Labs' fork of [cloudflare/cloudflare-os](https://github.com/cloudflare/cloudflare-os). The `main` branch tracks upstream, while the **`serspace` branch is the one used to build and run Serspace OS**, Serspace Labs' internal instance. It regularly merges upstream `main` and carries additions that are not part of the official Cloudflare OS release:
+
+* **An extended GitHub Gatekeeper** — read and write access to GitHub Projects, milestones, and assignees, with project field edits gated behind explicit human approval.
+* **Nested Gatekeeper app routes** — the frontend serves Gatekeeper apps under scoped nested routes, so a Gadget can own a multi-page URL space instead of a single path.
+* **Upstream sync tooling** — a `pnpm sync:upstream` workflow (plus fork-aware CI) that pulls `cloudflare/cloudflare-os` into this fork reproducibly.
+
+Everything below describes Cloudflare OS itself and applies to this branch as well.
 
 ## Quick Start
 
