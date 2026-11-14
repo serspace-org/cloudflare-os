@@ -1,4 +1,21 @@
-# Cloudflare OS: An AI productivity environment
+# Serspace OS: An experimental Cloudflare OS distribution
+
+## About the `serspace` branch
+
+This repository is Serspace's fork of [Cloudflare OS](https://github.com/cloudflare/cloudflare-os).
+The `serspace` branch builds ahead of Cloudflare's official distribution with Serspace-specific
+changes and experimental features that are not yet part of the official release. These additions
+are maintained by Serspace and should not be read as features endorsed or supported by Cloudflare.
+
+Our goal is to stay up to date with Cloudflare's official distribution while providing a place to
+experiment. Upstream updates are integrated through reviewed changes; this is not a guarantee that
+`serspace` always contains the latest upstream commit. Experimental features may change or be removed.
+See [Serspace fork automation](docs/fork-automation.md) for the upstream-sync and CI policy.
+
+The sections below describe the underlying Cloudflare OS platform and retain its upstream guidance.
+Cloudflare-hosted deployment links refer to Cloudflare's distribution, not this fork.
+
+## Cloudflare OS: An AI productivity environment
 
 Cloudflare OS is an "operating system" for AI productivity originally developed for use inside Cloudflare. A large portion of Cloudflare's workforce -- from engineering to sales and everything in between -- uses Cloudflare OS every day to help them do their jobs.
 
