@@ -6,7 +6,7 @@ import { parse } from "yaml";
 // Every new upstream workflow needs an explicit decision before it runs in the fork.
 const SHARED = ["ci.yml", "github-contract.yml", "label-pr.yml"];
 const UPSTREAM_ONLY = [
-  "bonk-pr.yml", "bonk.yml", "cla.yml", "contribution-policy.yml",
+  "bonk-pr.yml", "bonk.yml", "contribution-policy.yml",
   "preview.yml", "workshop-evals-pr.yml", "workshop-evals.yml",
 ];
 
