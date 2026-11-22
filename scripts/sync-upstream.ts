@@ -4,6 +4,12 @@ import { resolve, join } from "node:path";
 import { parseArgs } from "node:util";
 
 // Local only: never pushes, opens PRs, or moves the fork's base branch.
+//
+// The fork's history is a patch stack: serspace is upstream/main plus one commit per
+// maintained feature. This rehearses the same rebase that .github/workflows/sync-upstream.yml
+// runs, so a local check and a CI sync produce the same history. It never merges upstream:
+// a merge commit here would interleave fork and upstream work and the next sync would
+// have to replay it.
 function main() {
   const { values } = parseArgs({ options: {
     repo: { type: "string", default: "." },
@@ -13,15 +19,22 @@ function main() {
   } });
   if (values.help) {
     console.log("Usage: node scripts/sync-upstream.ts [--repo PATH] [--prepare] [--no-fetch]\n" +
-      "Check origin/serspace + upstream/main in an isolated worktree.\n" +
-      "--prepare keeps a local merge branch/worktree on success. Never pushes.\n" +
+      "Replay the origin/serspace patch stack onto upstream/main in an isolated worktree.\n" +
+      "--prepare keeps a local rebased branch/worktree on success. Never pushes.\n" +
       "--no-fetch uses existing remote-tracking refs (possibly stale).");
     return;
   }
   const repo = resolve(values.repo);
   const git = (cwd: string, args: string[], allowed = [0]) => {
     const result = spawnSync("git", ["-C", cwd, ...args], {
-      encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no" },
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        // Replay the stack unattended; the todo list and messages are taken as-is.
+        GIT_SEQUENCE_EDITOR: "true",
+        GIT_EDITOR: "true",
+      },
     });
     if (result.error) throw result.error;
     if (!allowed.includes(result.status ?? -1)) {
@@ -30,7 +43,7 @@ function main() {
     return { output: result.stdout.trim(), status: result.status };
   };
   const root = git(repo, ["rev-parse", "--show-toplevel"]).output;
-  console.log("Target: origin/serspace <- upstream/main (local merge only)");
+  console.log("Target: origin/serspace rebased onto upstream/main (local only)");
   if (!values["no-fetch"]) {
     git(root, ["fetch", "--no-tags", "origin", "+refs/heads/serspace:refs/remotes/origin/serspace"]);
     git(root, ["fetch", "--no-tags", "upstream", "+refs/heads/main:refs/remotes/upstream/main"]);
@@ -42,7 +55,7 @@ function main() {
     console.log("Already up to date; no worktree or branch created.");
     return;
   }
-  // A missing common ancestor is an error, not permission to join unrelated histories.
+  // A missing common ancestor is an error, not permission to replay onto an unrelated history.
   git(root, ["merge-base", base, upstream]);
   const branch = `sync/cloudflare-${base.slice(0, 8)}-${upstream.slice(0, 8)}`;
   const worktrees = join(root, ".worktrees");
@@ -56,31 +69,43 @@ function main() {
   const hooks = join(scratch, "empty-hooks");
   mkdirSync(hooks);
   const tree = join(scratch, "tree");
+  // Do not run repository hooks, prompt for signing, or consult stale rerere resolutions:
+  // a recorded resolution from an old merge-based sync can silently revert fork changes.
+  const quiet = ["-c", `core.hooksPath=${hooks}`, "-c", "commit.gpgsign=false", "-c", "rerere.enabled=false"];
   let added = false;
   try {
-    git(root, ["-c", `core.hooksPath=${hooks}`, "worktree", "add", "--detach", tree, base]);
+    git(root, [...quiet, "worktree", "add", "--detach", tree, base]);
     added = true;
-    // Do not run repository hooks or prompt for signing during a merge check.
-    const merge = git(tree, ["-c", `core.hooksPath=${hooks}`, "merge", "--no-commit", "--no-ff", upstream], [0, 1]);
-    if (merge.status !== 0) {
+    const stackBefore = git(tree, ["rev-list", "--count", `${upstream}..HEAD`]).output;
+    const rebase = git(tree, [...quiet, "rebase", "-i", "--autosquash", upstream], [0, 1]);
+    if (rebase.status !== 0) {
       const conflicts = git(tree, ["diff", "--name-only", "--diff-filter=U"]).output;
-      if (!conflicts) throw new Error(`Merge failed without file conflicts:\n${merge.output}`);
-      console.error(`Merge conflicts; base branch unchanged:\n${conflicts}`);
+      const stopped = git(tree, ["log", "-1", "--format=%h %s", "REBASE_HEAD"], [0, 128]).output;
+      git(tree, [...quiet, "rebase", "--abort"], [0, 1, 128]);
+      if (!conflicts) throw new Error(`Rebase failed without file conflicts:\n${rebase.output}`);
+      console.error(`Rebase conflicts; base branch unchanged.\nStopped at: ${stopped || "unknown"}\n${conflicts}`);
+      console.error("Resolve inside the topic commit the rebase stops on, so the fix stays part of that patch.");
       process.exitCode = 1;
       return;
     }
-    console.log("Conflict-free merge. This does not establish build or test compatibility.");
+    // The replayed stack must sit directly on upstream, with no merge commits reintroduced.
+    git(tree, ["merge-base", "--is-ancestor", upstream, "HEAD"]);
+    const merges = git(tree, ["rev-list", "--merges", `${upstream}..HEAD`]).output;
+    if (merges) throw new Error(`Rebased stack contains merge commits:\n${merges}`);
+    const stack = git(tree, ["log", "--format=%h %s", `${upstream}..HEAD`]).output;
+    const stackAfter = git(tree, ["rev-list", "--count", `${upstream}..HEAD`]).output;
+    console.log(`Clean rebase. This does not establish build or test compatibility.`);
+    console.log(`Stack on upstream (${stackBefore} commits before, ${stackAfter} after autosquash):\n${stack}`);
     if (!values.prepare) {
-      console.log("Check only; no merge commit or branch kept. Use --prepare to keep a local candidate.");
+      console.log("Check only; no branch kept. Use --prepare to keep a local candidate.");
       return;
     }
-    git(tree, ["-c", `core.hooksPath=${hooks}`, "-c", "commit.gpgsign=false", "commit", "-m", "Merge cloudflare/cloudflare-os main into Serspace fork"]);
     const head = git(tree, ["rev-parse", "HEAD"]).output;
-    // Create the named branch only after a successful merge commit.
-    git(tree, ["-c", `core.hooksPath=${hooks}`, "switch", "-c", branch]);
+    // Create the named branch only after a successful rebase.
+    git(tree, [...quiet, "switch", "-c", branch]);
     git(root, ["worktree", "move", tree, destination]);
     added = false;
-    console.log(`Prepared branch: ${branch}\nWorktree: ${destination}\nMerge commit: ${head}`);
+    console.log(`Prepared branch: ${branch}\nWorktree: ${destination}\nStack head: ${head}`);
     console.log("Next: review the diff; install dependencies; run the checks in docs/fork-automation.md. Nothing pushed.");
   } finally {
     if (added) git(root, ["worktree", "remove", "--force", tree]);
