@@ -17,7 +17,7 @@ We are making Cloudflare OS open source so that others can copy it and customize
 
 ## About this fork: the `serspace` branch
 
-This repository is Serspace Labs' fork of [cloudflare/cloudflare-os](https://github.com/cloudflare/cloudflare-os). The `main` branch tracks upstream, while the **`serspace` branch is the one used to build and run Serspace OS**, Serspace Labs' internal instance. It regularly merges upstream `main` and carries additions that are not part of the official Cloudflare OS release:
+This repository is Serspace Labs' fork of [cloudflare/cloudflare-os](https://github.com/cloudflare/cloudflare-os). The `main` branch tracks upstream, while the **`serspace` branch is the one used to build and run Serspace OS**, Serspace Labs' internal instance. It is regularly rebased onto upstream `main` and carries additions that are not part of the official Cloudflare OS release:
 
 * **An extended GitHub Gatekeeper** — read and write access to GitHub Projects, milestones, and assignees, with project field edits gated behind explicit human approval.
 * **Nested Gatekeeper app routes** — the frontend serves Gatekeeper apps under scoped nested routes, so a Gadget can own a multi-page URL space instead of a single path.
