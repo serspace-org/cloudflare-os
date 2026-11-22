@@ -62,7 +62,7 @@ test("check preserves dirty checkout and removes temporary worktree", (t) => {
   const branches = git("branch", "--format=%(refname)");
   const result = run("--no-fetch");
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Conflict-free/);
+  assert.match(result.stdout, /Clean rebase/);
   assert.equal(git("rev-parse", "HEAD"), fork);
   assert.equal(git("status", "--porcelain"), status);
   assert.equal(git("branch", "--format=%(refname)"), branches);
@@ -75,21 +75,26 @@ test("conflicts fail clearly without changing branches or leaving worktrees", (t
   const { fork } = diverge(true);
   const result = run("--no-fetch", "--prepare");
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /Merge conflicts.*\nshared.txt/);
+  assert.match(result.stderr, /Rebase conflicts/);
+  assert.match(result.stderr, /Stopped at: \w+ fork customization/);
+  assert.match(result.stderr, /^shared.txt$/m);
   assert.equal(git("rev-parse", "HEAD"), fork);
   assert.equal(git("status", "--porcelain"), "");
   assert.deepEqual(readdirSync(join(repo, ".worktrees")), []);
 });
 
-test("prepare keeps both histories and refuses to overwrite a candidate", (t) => {
+test("prepare replays the stack onto upstream and refuses to overwrite a candidate", (t) => {
   const { repo, run, git, diverge } = fixture(t);
   const { fork, upstream } = diverge();
   const result = run("--no-fetch", "--prepare");
   assert.equal(result.status, 0, result.stderr);
   const branch = result.stdout.match(/Prepared branch: (.+)/)?.[1];
   assert.ok(branch);
-  assert.equal(git("rev-parse", `${branch}^1`), fork);
-  assert.equal(git("rev-parse", `${branch}^2`), upstream);
+  // The fork commit is replayed directly onto upstream, not joined to it by a merge.
+  assert.equal(git("rev-parse", `${branch}^1`), upstream);
+  assert.equal(spawnSync("git", ["-C", repo, "rev-parse", "--verify", `${branch}^2`]).status !== 0, true);
+  assert.equal(git("log", "--format=%s", `${upstream}..${branch}`), "fork customization");
+  assert.notEqual(git("rev-parse", branch), fork);
   assert.equal(git("rev-parse", "HEAD"), fork);
   const tree = result.stdout.match(/Worktree: (.+)/)?.[1];
   assert.ok(tree);
@@ -108,7 +113,7 @@ test("default fetches the configured remotes, not stale tracking refs", (t) => {
   git("update-ref", "refs/remotes/upstream/main", base);
   const result = run();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Conflict-free/);
+  assert.match(result.stdout, /Clean rebase/);
   assert.equal(git("rev-parse", "refs/remotes/upstream/main"), upstream);
 });
 
@@ -137,4 +142,22 @@ test("checkout hooks cannot run or leave stale registrations in either mode", (t
     assert.equal(git("worktree", "list", "--porcelain").match(/^worktree /gm)?.length, expectedWorktrees);
     assert.equal(readdirSync(join(repo, ".worktrees")).length, expectedWorktrees - 1);
   }
+});
+
+test("autosquash folds a fixup into its topic commit instead of growing the stack", (t) => {
+  const { repo, run, git, diverge } = fixture(t);
+  diverge();
+  writeFileSync(join(repo, "fork.txt"), "fork, corrected\n");
+  git("add", ".");
+  git("commit", "--fixup", "HEAD");
+  git("update-ref", "refs/remotes/origin/serspace", git("rev-parse", "HEAD"));
+  const result = run("--no-fetch", "--prepare");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /2 commits before, 1 after autosquash/);
+  const branch = result.stdout.match(/Prepared branch: (.+)/)?.[1];
+  assert.ok(branch);
+  assert.equal(git("log", "--format=%s", `refs/remotes/upstream/main..${branch}`), "fork customization");
+  const tree = result.stdout.match(/Worktree: (.+)/)?.[1];
+  assert.ok(tree);
+  assert.equal(readFileSync(join(tree, "fork.txt"), "utf8"), "fork, corrected\n");
 });
