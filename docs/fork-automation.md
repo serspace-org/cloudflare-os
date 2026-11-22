@@ -84,10 +84,14 @@ This fetches `origin` branch `serspace` and `upstream` branch `main`, prints the
 exact commits, and replays the stack onto upstream in a disposable detached
 worktree under `.worktrees/` — the same `rebase -i --autosquash` the workflow
 runs, so a local check and a CI sync produce the same history. It preserves your
-current branch, staged/unstaged changes, and untracked files. It never pushes,
-opens a PR, changes the deployment submodule pin, or moves local `serspace`.
-Fetching updates remote-tracking refs and Git objects; this is not a fully
-read-only operation.
+current branch, staged/unstaged changes, and untracked files. Without `--pr` it
+never pushes, opens a pull request, changes the deployment submodule pin, or
+moves local `serspace`. Fetching updates remote-tracking refs and Git objects;
+this is not a fully read-only operation.
+
+`--help` lists every flag. `pnpm sync:upstream --pr` is the full local path from a
+check to a reviewable candidate; `--base`/`--upstream` exercise the rebase against
+arbitrary commits when there is nothing to sync.
 
 Verify `origin` points to `serspace-org/cloudflare-os` and `upstream` points to
 `cloudflare/cloudflare-os` before running. The script uses those configured
@@ -115,6 +119,53 @@ Stale `rerere` resolutions are a real hazard here: a resolution recorded during 
 fork's old merge-based syncs can silently revert fork changes when replayed, so the
 script and the workflow both run with `rerere.enabled=false`. Keep it that way.
 
+### Publishing a candidate (`--pr`)
+
+```sh
+pnpm sync:upstream --pr
+```
+
+On a clean rebase this pushes the `sync/cloudflare-*` branch to `origin` and opens a
+pull request against `serspace`, so the candidate gets review and CI from a local
+run. It implies `--prepare`, so the worktree is kept for investigation. A second run
+on the same pair of commits force-pushes the branch and reports the open pull
+request rather than failing. Needs an authenticated `gh`.
+
+**That pull request must not be merged.** Merging it would put a merge commit on
+`serspace`. It is a review and CI artifact; promote a green candidate by force-push —
+Actions → **Sync upstream** → `mode=apply`, or
+`git push --force-with-lease=serspace:<fork SHA> origin <branch>:serspace` — then close
+it. The pull request body repeats this, with the exact command filled in.
+
+Guardrails, all checked before any rebase work happens:
+
+- The candidate branch name is always `sync/cloudflare-*`; the script cannot address
+  `serspace`, and the only ref it ever pushes is that candidate.
+- Every `gh` call pins `--repo` to `origin`'s owner and repository. This matters: with
+  an `upstream` remote present and no default repository set, `gh` picks a repository
+  itself and can target `cloudflare/cloudflare-os`.
+- `--pr` refuses to combine with `--base`/`--upstream`, so a rehearsal of arbitrary
+  commits can never be published as a real sync.
+- A conflicted rebase pushes nothing and keeps no branch.
+
+### Exercising the rebase with nothing to sync
+
+When `serspace` is already on top of `upstream/main` the script reports that and stops,
+which leaves nothing to test. `--base` and `--upstream` rehearse any two commits:
+
+```sh
+# Replay the current stack over the last 25 upstream commits.
+git branch old-fork upstream/main~25
+git switch old-fork && git cherry-pick origin/serspace~7..origin/serspace && git switch -
+pnpm sync:upstream --no-fetch --base old-fork --upstream upstream/main --prepare
+```
+
+The prepared candidate's tree should be identical to `origin/serspace`
+(`git diff --quiet <stack head> origin/serspace`), its oldest commit's parent should be
+`upstream/main`, and `git rev-list --merges upstream/main..<stack head>` should be empty.
+Overrides print a `rehearsal override` banner, skip fetching, and cannot be published.
+Delete the branch and worktree afterwards.
+
 Options pass directly through the pnpm command, for example
 `pnpm sync:upstream --no-fetch` or `pnpm sync:upstream --repo PATH`.
 The underlying `node scripts/sync-upstream.ts` entry point remains available
@@ -131,8 +182,8 @@ with Git.
 
 **A clean rebase is not verified compatibility.** In the prepared worktree,
 install dependencies with `pnpm install`, review the rebased diff, and run the
-checklist below before pushing or requesting review. Publishing and merging
-remain separate operator actions. Remove a retained candidate with
+checklist below before promoting a candidate. Publishing a candidate and promoting
+it to `serspace` remain separate operator actions. Remove a retained candidate with
 `git worktree remove <printed-path>` when no longer needed; the branch remains
 until explicitly deleted. Do not force-remove a worktree with work to preserve.
 

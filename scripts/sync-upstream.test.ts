@@ -161,3 +161,131 @@ test("autosquash folds a fixup into its topic commit instead of growing the stac
   assert.ok(tree);
   assert.equal(readFileSync(join(tree, "fork.txt"), "utf8"), "fork, corrected\n");
 });
+
+// --pr needs a remote it can push to and a slug it can read. Point origin's fetch URL at a
+// GitHub-style address for the slug and its push URL at a local bare repository.
+function publishable(repo: string, git: (...args: string[]) => string, t: { after: (fn: () => void) => void }) {
+  const bare = mkdtempSync(join(tmpdir(), "os-sync-origin-"));
+  t.after(() => rmSync(bare, { recursive: true, force: true }));
+  spawnSync("git", ["init", "--bare", "-b", "serspace", bare]);
+  git("remote", "add", "origin", "git@github.com:serspace-org/cloudflare-os.git");
+  git("config", "remote.origin.pushurl", bare);
+  const bin = mkdtempSync(join(tmpdir(), "os-sync-bin-"));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  const calls = join(bin, "calls");
+  const stub = (body: string) => {
+    writeFileSync(join(bin, "gh"),
+      `#!/bin/sh\nprintf '%s\\n' "$1 $2 $3 $4 $5 $6 $7 $8" >> ${JSON.stringify(calls)}\n${body}\n`);
+    chmodSync(join(bin, "gh"), 0o755);
+  };
+  const recorded = () => (existsSync(calls) ? readFileSync(calls, "utf8").trimEnd().split("\n") : []);
+  const path = { PATH: `${bin}:${process.env.PATH ?? ""}` };
+  return { bare, stub, recorded, path };
+}
+
+const ghStub = (prListUrl = "") => `
+case "$*" in
+  *"auth status"*) exit 0 ;;
+  *"pr list"*) printf '%s' ${JSON.stringify(prListUrl)}; exit 0 ;;
+  *"pr create"*) echo "https://github.com/serspace-org/cloudflare-os/pull/99"; exit 0 ;;
+esac
+exit 1`;
+
+test("base and upstream overrides exercise the rebase without touching the real refs", (t) => {
+  const { run, git, diverge, base } = fixture(t);
+  const { fork, upstream } = diverge();
+  // Pretend the fork tip is the shared base: the stack is then empty and already on upstream.
+  const stale = run("--no-fetch", "--base", base, "--upstream", upstream);
+  assert.equal(stale.status, 0, stale.stderr);
+  assert.match(stale.stdout, /rehearsal override; cannot be published/);
+  const result = run("--no-fetch", "--base", fork, "--upstream", upstream);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Clean rebase/);
+  assert.match(result.stdout, /fork customization/);
+  assert.equal(git("rev-parse", "refs/remotes/origin/serspace"), fork);
+});
+
+test("up-to-date names the overrides that exercise the rebase anyway", (t) => {
+  const { run } = fixture(t);
+  const result = run("--no-fetch");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /--base\/--upstream/);
+});
+
+test("pr publishes the candidate and targets the fork explicitly", (t) => {
+  const { repo, git, diverge } = fixture(t);
+  const { upstream } = diverge();
+  const { bare, stub, recorded, path } = publishable(repo, git, t);
+  stub(ghStub());
+  const result = spawnSync(process.execPath, [script, "--repo", repo, "--no-fetch", "--pr"],
+    { encoding: "utf8", env: { ...process.env, ...path } });
+  assert.equal(result.status, 0, result.stderr);
+  const branch = result.stdout.match(/Prepared branch: (.+)/)?.[1];
+  assert.ok(branch);
+  // Pushed only the candidate; serspace on the remote is untouched.
+  const remote = spawnSync("git", ["-C", bare, "branch", "--format=%(refname:short)"], { encoding: "utf8" }).stdout;
+  assert.deepEqual(remote.trim().split("\n"), [branch]);
+  assert.equal(spawnSync("git", ["-C", bare, "rev-parse", `${branch}^1`], { encoding: "utf8" }).stdout.trim(), upstream);
+  const calls = recorded();
+  assert.match(calls[0], /^auth status\b/);
+  // Every gh call pins the fork: with an upstream remote and no default, gh would guess.
+  for (const call of calls.slice(1)) assert.match(call, /^--repo serspace-org\/cloudflare-os /);
+  assert.ok(calls.some((c) => c.includes(`pr create --base serspace --head ${branch}`)), calls.join(" | "));
+  assert.match(result.stdout, /Opened: https:\/\/github.com\/serspace-org\/cloudflare-os\/pull\/99/);
+  assert.match(result.stdout, /Do not merge it/);
+});
+
+test("pr reuses an open pull request instead of failing on a second run", (t) => {
+  const { repo, git, diverge } = fixture(t);
+  diverge();
+  const { stub, recorded, path } = publishable(repo, git, t);
+  stub(ghStub("https://github.com/serspace-org/cloudflare-os/pull/7"));
+  const result = spawnSync(process.execPath, [script, "--repo", repo, "--no-fetch", "--pr"],
+    { encoding: "utf8", env: { ...process.env, ...path } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /already open, updated by the push: .*\/pull\/7/);
+  assert.equal(recorded().some((c) => c.includes("pr create")), false);
+});
+
+test("pr refuses rehearsal overrides, unusable gh and an unreadable origin, before rebasing", (t) => {
+  const { repo, git, diverge, base } = fixture(t);
+  const { upstream } = diverge();
+  const { stub, path } = publishable(repo, git, t);
+
+  stub(ghStub());
+  const override = spawnSync(process.execPath,
+    [script, "--repo", repo, "--no-fetch", "--pr", "--base", base, "--upstream", upstream],
+    { encoding: "utf8", env: { ...process.env, ...path } });
+  assert.equal(override.status, 2);
+  assert.match(override.stderr, /cannot be combined with --base\/--upstream/);
+
+  stub("exit 1");
+  const unauthenticated = spawnSync(process.execPath, [script, "--repo", repo, "--no-fetch", "--pr"],
+    { encoding: "utf8", env: { ...process.env, ...path } });
+  assert.equal(unauthenticated.status, 2);
+  assert.match(unauthenticated.stderr, /needs an authenticated GitHub CLI/);
+
+  stub(ghStub());
+  git("remote", "set-url", "origin", "/srv/git/not-a-github-remote");
+  const unreadable = spawnSync(process.execPath, [script, "--repo", repo, "--no-fetch", "--pr"],
+    { encoding: "utf8", env: { ...process.env, ...path } });
+  assert.equal(unreadable.status, 2);
+  assert.match(unreadable.stderr, /Cannot read an owner\/repo/);
+
+  // Every refusal happens before any worktree is created.
+  assert.equal(existsSync(join(repo, ".worktrees")), false);
+});
+
+test("pr pushes nothing when the rebase conflicts", (t) => {
+  const { repo, git, diverge } = fixture(t);
+  diverge(true);
+  const { bare, stub, recorded, path } = publishable(repo, git, t);
+  stub(ghStub());
+  const result = spawnSync(process.execPath, [script, "--repo", repo, "--no-fetch", "--pr"],
+    { encoding: "utf8", env: { ...process.env, ...path } });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /nothing pushed and no branch kept/);
+  assert.equal(spawnSync("git", ["-C", bare, "branch"], { encoding: "utf8" }).stdout.trim(), "");
+  assert.deepEqual(recorded().map((c) => c.trim()), ["auth status"]);
+  assert.deepEqual(readdirSync(join(repo, ".worktrees")), []);
+});
