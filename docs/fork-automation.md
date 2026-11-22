@@ -15,11 +15,31 @@ passing substitutes for checks that actually ran.
 | `workshop-evals.yml`, `workshop-evals-pr.yml` | Upstream-only paid inference and reporting. |
 | `sync-upstream.yml` | Fork-only triggered rebase of the serspace patch stack onto upstream main. |
 
+## The patch-stack invariant
+
+`serspace` is always `upstream/main` plus one commit per maintained feature, replayed by rebase:
+
+> Never merge upstream into the fork — always rebase the stack onto it. Never merge a pull
+> request into `serspace` — always squash it into a single commit.
+
+Both halves matter. A merge commit from an upstream sync interleaves fork and upstream work, and
+a merge commit from a fork pull request means the next sync has to replay a merge. Either one
+turns the stack into a history where "our changes" and "Cloudflare's changes" can no longer be
+separated, and every later sync inherits the tangle. Everything in this document — the workflow,
+the rehearsal script, and the repository settings below — exists to keep that from happening.
+
+Verify the invariant at any time:
+
+```sh
+git fetch upstream && git merge-base --is-ancestor upstream/main origin/serspace &&
+  git rev-list --merges upstream/main..origin/serspace
+```
+
+The first command must succeed and the second must print nothing.
+
 ## Triggered sync (sync-upstream.yml)
 
-The fork's history is a patch stack: `serspace` is always `upstream/main` plus one commit per
-maintained feature, replayed by rebase. The **Sync upstream** workflow (Actions → Sync upstream →
-Run workflow) performs that rebase in CI:
+The **Sync upstream** workflow (Actions → Sync upstream → Run workflow) performs the rebase in CI:
 
 - **mode=check** (default): rebases the stack (with `--autosquash`, so `fixup!` commits fold into
   their topic commits), pushes the result as a `sync/cloudflare-*` branch, and dispatches CI on it.
@@ -37,7 +57,22 @@ from old merge-based syncs can silently revert fork changes.
 
 ## Upstream sync checklist
 
-### Local merge rehearsal
+### Local setup
+
+Configure the checkout so routine commands cannot produce a merge:
+
+```sh
+git config pull.rebase true
+git config rebase.autosquash true
+git config rebase.updateRefs true
+git config fetch.prune true
+```
+
+Without `pull.rebase`, a single `git pull` on `serspace` after a sync force-push creates a merge
+commit and silently breaks the invariant. `rebase.autosquash` makes `fixup!` commits fold into
+their topic commit, which is how a fix to an existing fork feature stays one commit.
+
+### Local rebase rehearsal
 
 From a checkout of this fork, using Node 24.19 or newer and Git:
 
@@ -46,11 +81,17 @@ pnpm sync:upstream
 ```
 
 This fetches `origin` branch `serspace` and `upstream` branch `main`, prints their
-exact commits, and checks the merge in a disposable detached worktree under
-`.worktrees/`. It preserves your current branch, staged/unstaged changes, and
-untracked files. It never pushes, opens a PR, changes the deployment submodule
-pin, or moves local `serspace`. Fetching updates remote-tracking refs and Git
-objects; this is not a fully read-only operation.
+exact commits, and replays the stack onto upstream in a disposable detached
+worktree under `.worktrees/` — the same `rebase -i --autosquash` the workflow
+runs, so a local check and a CI sync produce the same history. It preserves your
+current branch, staged/unstaged changes, and untracked files. Without `--pr` it
+never pushes, opens a pull request, changes the deployment submodule pin, or
+moves local `serspace`. Fetching updates remote-tracking refs and Git objects;
+this is not a fully read-only operation.
+
+`--help` lists every flag. `pnpm sync:upstream --pr` is the full local path from a
+check to a reviewable candidate; `--base`/`--upstream` exercise the rebase against
+arbitrary commits when there is nothing to sync.
 
 Verify `origin` points to `serspace-org/cloudflare-os` and `upstream` points to
 `cloudflare/cloudflare-os` before running. The script uses those configured
@@ -58,18 +99,72 @@ remotes, not hardcoded GitHub URLs. Use `--repo PATH` to target another checkout
 including the deployment's `cloudflare-os` submodule. `--no-fetch` rehearses
 existing remote-tracking commits without network access; those refs may be stale.
 
-To retain a successful merge for review and verification:
+To retain a successful rebase for review and verification:
 
 ```sh
 pnpm sync:upstream --prepare
 ```
 
-The script prints the new `sync/cloudflare-<fork SHA>-<upstream SHA>` branch,
-worktree path, and merge commit. It refuses to overwrite an existing candidate.
-Hooks are disabled for worktree creation, branch switching, merging, and
-committing; commit signing is disabled for the prepared commit, which uses your
-configured Git identity. No upstream application code
-is run during the rehearsal. Review before installing or testing upstream code.
+The script prints the new `sync/cloudflare-<fork SHA>-<upstream SHA>` branch — the
+same name the workflow uses for the same pair of commits — the worktree path, the
+rebased stack head, and the stack itself, with the commit count before and after
+autosquash so a folded `fixup!` is visible rather than silent. It refuses to
+overwrite an existing candidate. Hooks are disabled for worktree creation, branch
+switching and the rebase, `rerere` is disabled, and commit signing is disabled for
+the replayed commits, which keep their original authors and take your configured
+Git identity as committer. No upstream application code is run during the
+rehearsal. Review before installing or testing upstream code.
+
+Stale `rerere` resolutions are a real hazard here: a resolution recorded during the
+fork's old merge-based syncs can silently revert fork changes when replayed, so the
+script and the workflow both run with `rerere.enabled=false`. Keep it that way.
+
+### Publishing a candidate (`--pr`)
+
+```sh
+pnpm sync:upstream --pr
+```
+
+On a clean rebase this pushes the `sync/cloudflare-*` branch to `origin` and opens a
+pull request against `serspace`, so the candidate gets review and CI from a local
+run. It implies `--prepare`, so the worktree is kept for investigation. A second run
+on the same pair of commits force-pushes the branch and reports the open pull
+request rather than failing. Needs an authenticated `gh`.
+
+**That pull request must not be merged.** Merging it would put a merge commit on
+`serspace`. It is a review and CI artifact; promote a green candidate by force-push —
+Actions → **Sync upstream** → `mode=apply`, or
+`git push --force-with-lease=serspace:<fork SHA> origin <branch>:serspace` — then close
+it. The pull request body repeats this, with the exact command filled in.
+
+Guardrails, all checked before any rebase work happens:
+
+- The candidate branch name is always `sync/cloudflare-*`; the script cannot address
+  `serspace`, and the only ref it ever pushes is that candidate.
+- Every `gh` call pins `--repo` to `origin`'s owner and repository. This matters: with
+  an `upstream` remote present and no default repository set, `gh` picks a repository
+  itself and can target `cloudflare/cloudflare-os`.
+- `--pr` refuses to combine with `--base`/`--upstream`, so a rehearsal of arbitrary
+  commits can never be published as a real sync.
+- A conflicted rebase pushes nothing and keeps no branch.
+
+### Exercising the rebase with nothing to sync
+
+When `serspace` is already on top of `upstream/main` the script reports that and stops,
+which leaves nothing to test. `--base` and `--upstream` rehearse any two commits:
+
+```sh
+# Replay the current stack over the last 25 upstream commits.
+git branch old-fork upstream/main~25
+git switch old-fork && git cherry-pick origin/serspace~7..origin/serspace && git switch -
+pnpm sync:upstream --no-fetch --base old-fork --upstream upstream/main --prepare
+```
+
+The prepared candidate's tree should be identical to `origin/serspace`
+(`git diff --quiet <stack head> origin/serspace`), its oldest commit's parent should be
+`upstream/main`, and `git rev-list --merges upstream/main..<stack head>` should be empty.
+Overrides print a `rehearsal override` banner, skip fetching, and cannot be published.
+Delete the branch and worktree afterwards.
 
 Options pass directly through the pnpm command, for example
 `pnpm sync:upstream --no-fetch` or `pnpm sync:upstream --repo PATH`.
@@ -77,15 +172,18 @@ The underlying `node scripts/sync-upstream.ts` entry point remains available
 without installing dependencies. In a deployment checkout, after its submodule
 pin includes this script, use `pnpm --dir cloudflare-os sync:upstream`.
 
-Exit codes: **0** = up to date or conflict-free; **1** = merge conflicts (file
-names printed); **2** = configuration/Git/usage error. Normal completion removes
-the disposable worktree even on conflicts. A killed process can leave a
-`sync-check-*` directory; inspect it before removing that worktree with Git.
+Exit codes: **0** = up to date or clean rebase; **1** = rebase conflicts (the
+stopped commit and conflicted file names printed); **2** = configuration/Git/usage
+error. A conflicted rehearsal aborts the rebase and removes the disposable
+worktree; resolve conflicts in your own checkout, inside the topic commit the
+rebase stops on, so the resolution becomes part of that patch. A killed process
+can leave a `sync-check-*` directory; inspect it before removing that worktree
+with Git.
 
-**Conflict-free is not verified compatibility.** In the prepared worktree,
-install dependencies with `pnpm install`, review the merged diff, and run the
-checklist below before pushing or requesting review. Publishing and merging
-remain separate operator actions. Remove a retained candidate with
+**A clean rebase is not verified compatibility.** In the prepared worktree,
+install dependencies with `pnpm install`, review the rebased diff, and run the
+checklist below before promoting a candidate. Publishing a candidate and promoting
+it to `serspace` remain separate operator actions. Remove a retained candidate with
 `git worktree remove <printed-path>` when no longer needed; the branch remains
 until explicitly deleted. Do not force-remove a worktree with work to preserve.
 
@@ -97,7 +195,8 @@ node --test scripts/sync-upstream.test.ts
 
 ### Verification before accepting a sync
 
-1. Start from the current remote `serspace` and merge upstream `main`, preserving ancestry.
+1. Start from the current remote `serspace` and rebase it onto upstream `main`. The result must
+   have `upstream/main` as an ancestor and contain no merge commits.
 2. Preserve every upstream-only job's repository guard, including cleanup and bypass jobs.
 3. Classify new workflows in `scripts/fork-workflows.test.ts`. New deployment, review or paid
    evaluation automation must not run in the fork without an explicit configuration decision.
@@ -130,3 +229,27 @@ Review rulesets and branch protection for `serspace`: retain quality CI requirem
 requirements for upstream-only checks such as `CLAssistant` and `bonk` if present. Disabling a
 workflow does not remove a required check or erase old failed results. Do not sign agreements
 on behalf of upstream contributors or fabricate passing checks to clear old results.
+
+### Settings the patch-stack invariant depends on
+
+These are repository settings, not committed files, so nothing in this repository can enforce
+them. They are the mechanical half of the invariant above; without them the rule depends on
+everyone remembering it.
+
+- **Default branch `serspace`.** It is where fork work belongs and what pull requests should
+  target by default. A stale `main` left as the default sends new pull requests at a branch
+  that is behind upstream and whose history is merge-shaped.
+- **`main` is not a fork branch.** Either delete it or keep it as a pure mirror of
+  `cloudflare/cloudflare-os` main that is never merged into anything.
+- **Merge commits disabled** for pull requests — squash only, so each fork feature lands as one
+  commit. Rebase merging is also acceptable for a deliberately multi-commit feature.
+- **Linear history required on `serspace`**, which makes a merge commit on the branch impossible
+  rather than merely discouraged. It is compatible with the sync workflow, whose `mode=apply`
+  step force-pushes a linear rebased stack.
+- **Force pushes allowed on `serspace`** for the actor the sync workflow runs as, and for fork
+  maintainers resolving a conflicted stack locally. The workflow always pushes with a lease, so
+  a concurrent push aborts the sync instead of discarding it.
+
+A force-push to `serspace` rewrites commits everyone has. After any `mode=apply` sync, every
+checkout must `git fetch && git reset --hard origin/serspace`; a `git pull` there merges the old
+stack back in, which is what `pull.rebase true` above prevents.
