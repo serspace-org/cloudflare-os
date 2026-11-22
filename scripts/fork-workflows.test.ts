@@ -3,7 +3,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { parse } from "yaml";
 
-// Every new upstream workflow needs an explicit decision before it runs in the fork.
+// Every new upstream workflow needs an explicit decision before it runs in the fork. The checks
+// below read job-level `if:` conditions only: they prove a job cannot start in the fork, not that
+// a started job is harmless. `on:` triggers and step conditions are the reviewer's call, and
+// disabling a workflow in repository settings is the second layer. See docs/fork-automation.md.
 const SHARED = ["ci.yml", "github-contract.yml", "label-pr.yml"];
 const UPSTREAM_ONLY = [
   "bonk-pr.yml", "bonk.yml", "contribution-policy.yml",

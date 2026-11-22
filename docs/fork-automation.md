@@ -9,7 +9,7 @@ passing substitutes for checks that actually ran.
 | `ci.yml` | Keep lint, build, types and tests on pull requests and pushes to `serspace` and `main`. |
 | `label-pr.yml` | Keep generic changed-area labels. |
 | `github-contract.yml` | Keep optional contract tests; actual tests require an explicitly configured disposable repository and token. |
-| `cla.yml`, `contribution-policy.yml` | Upstream-only contributor administration. |
+| `contribution-policy.yml` | Upstream-only contributor administration. |
 | `bonk.yml`, `bonk-pr.yml` | Upstream-only review service and gateway configuration. |
 | `preview.yml` | Upstream-only deployment infrastructure. |
 | `workshop-evals.yml`, `workshop-evals-pr.yml` | Upstream-only paid inference and reporting. |
@@ -206,35 +206,45 @@ node --test scripts/sync-upstream.test.ts
 
 The regression test runs in the normal scripts test task and therefore in GitHub's quality CI.
 It detects unclassified workflows, missing job guards and top-level ORs that bypass the guards.
-This prevents accidental reintroduction from passing CI; it cannot prevent an administrator
-from deliberately bypassing CI or changing workflow settings.
+It reads job-level `if:` conditions only — not `on:` triggers or step conditions — so a guarded
+job that gains a side effect in a step is the reviewer's problem, not the test's. This prevents
+accidental reintroduction from passing CI; it cannot prevent an administrator from deliberately
+bypassing CI or changing workflow settings.
 
-## Initial rollout and repository settings
+## Repository settings
 
-`pull_request_target` jobs use trusted base-branch code. Guards added in a pull request do not
-change those jobs until the guards reach the base branch. The existing CLA and contribution
-policy can therefore still run on the PR introducing this policy. Comment-triggered workflows
-also need the policy on the default branch before it governs new comment events.
+A guard in a committed file is the first layer. Disabling the upstream-only workflows in the
+Actions UI is the second, and it is not controlled by these files — it also holds when an
+upstream change rewrites a guard. Keep both.
 
-A repository administrator can disable the upstream-only workflows in the Actions UI during
-rollout. This repository setting is also a useful second layer against upstream changes; it is
-not controlled by these committed files. Cancel obsolete in-progress runs separately if needed.
+A `pull_request_target` job runs the trusted base-branch revision, so a guard added in a pull
+request does not govern that pull request's own run; it takes effect once it reaches the base
+branch. The same applies to comment-triggered workflows and new comment events.
 
-On 2026-10-28, all seven upstream-only workflows listed above were disabled in
-`serspace-org/cloudflare-os` repository settings. CI, changed-area labels and the optional GitHub
-contract workflow remained enabled. The inspected default-branch ruleset required a pull request
-but no status checks, so no check requirements needed removal. Re-check settings if rules change.
+Verified on 2026-11-21 in `serspace-org/cloudflare-os`:
 
-Review rulesets and branch protection for `serspace`: retain quality CI requirements, and remove
-requirements for upstream-only checks such as `CLAssistant` and `bonk` if present. Disabling a
-workflow does not remove a required check or erase old failed results. Do not sign agreements
-on behalf of upstream contributors or fabricate passing checks to clear old results.
+- Six upstream-only workflows — `contribution-policy.yml`, `bonk.yml`, `bonk-pr.yml`,
+  `preview.yml`, `workshop-evals.yml`, `workshop-evals-pr.yml` — are `disabled_manually`.
+  `cla.yml` is no longer one of them: Cloudflare deleted the CLA Assistant workflow upstream in
+  `e08850f7` (#1172) because contributors are no longer asked to sign the Cloudflare CLA.
+- `ci.yml`, `label-pr.yml`, `github-contract.yml` and `sync-upstream.yml` are active.
+- The default branch is `serspace`, and `main` is a clean ancestor of `upstream/main` — a stale
+  mirror, with nothing of its own.
+- The `Primary` ruleset on the default branch carries a deletion rule and nothing else. It does
+  **not** require linear history, a pull request, or any status check. The settings below are
+  therefore the rule everyone remembers, not a rule the repository enforces; #36 was merged into
+  `serspace` as a merge commit for exactly that reason.
+
+Disabling a workflow does not remove a required check or erase old failed results. If a ruleset
+ever requires an upstream-only check such as `bonk`, remove the requirement rather than trying
+to satisfy it. Do not fabricate passing checks to clear old results.
 
 ### Settings the patch-stack invariant depends on
 
 These are repository settings, not committed files, so nothing in this repository can enforce
 them. They are the mechanical half of the invariant above; without them the rule depends on
-everyone remembering it.
+everyone remembering it. As of 2026-11-21 only the first two are in place — the ruleset work
+below is outstanding.
 
 - **Default branch `serspace`.** It is where fork work belongs and what pull requests should
   target by default. A stale `main` left as the default sends new pull requests at a branch
@@ -245,7 +255,8 @@ everyone remembering it.
   commit. Rebase merging is also acceptable for a deliberately multi-commit feature.
 - **Linear history required on `serspace`**, which makes a merge commit on the branch impossible
   rather than merely discouraged. It is compatible with the sync workflow, whose `mode=apply`
-  step force-pushes a linear rebased stack.
+  step force-pushes a linear rebased stack. Add it to the `Primary` ruleset alongside the
+  existing deletion rule, together with the `lint` and `test` checks from `ci.yml`.
 - **Force pushes allowed on `serspace`** for the actor the sync workflow runs as, and for fork
   maintainers resolving a conflicted stack locally. The workflow always pushes with a lease, so
   a concurrent push aborts the sync instead of discarding it.
