@@ -87,7 +87,7 @@ jobs:
           branch="${{ steps.rebase.outputs.branch }}"
           git push --force origin "HEAD:refs/heads/$branch"
           # Pushes made with GITHUB_TOKEN do not trigger push workflows; dispatch CI explicitly.
-          gh workflow run ci.yml --ref "$branch"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
           echo "CI dispatched on \`$branch\`." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Promote to serspace
@@ -96,7 +96,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git push --force-with-lease=serspace:${{ steps.rebase.outputs.base }} origin HEAD:serspace
-          gh workflow run ci.yml --ref serspace
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref serspace
           {
             echo "## serspace updated"
             echo
